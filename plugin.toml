@@ -1,0 +1,6 @@
+schema = 1
+id = "tern-desktop-pet"
+name = "Tern Desktop Pet"
+version = "0.1.0"
+description = "Connect local Tern agents to the native desktop pet."
+window = "window.luau"
