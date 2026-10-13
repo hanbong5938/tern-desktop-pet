@@ -1,3 +1,4 @@
 .DS_Store
 tern.d.luau
 .luau-lsp/
+native-adapter/target/

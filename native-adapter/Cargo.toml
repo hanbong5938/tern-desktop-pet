@@ -1,0 +1,11 @@
+[package]
+name = "desktop-pet-tern"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+desktop-pet-contracts = { git = "https://github.com/hanbong5938/desktop-pet", rev = "85c644cd90d8c6a9e97e9dc313cc4750f344235f" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
