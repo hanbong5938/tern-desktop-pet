@@ -436,7 +436,11 @@ fn validate_tern_reply(
         || (reply.ok
             && (reply.error.is_some()
                 || reply.error_code.is_some()
-                || reply.hosts.len() != request.hosts.len()))
+                || reply.hosts.len() != request.hosts.len()
+                || request
+                    .instance_id
+                    .as_deref()
+                    .is_some_and(|instance| instance != reply.instance_id)))
         || (!reply.ok
             && (reply.error.as_deref().is_none_or(str::is_empty)
                 || reply

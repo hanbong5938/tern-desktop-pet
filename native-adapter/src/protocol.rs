@@ -13,6 +13,7 @@ pub const MAX_EXCHANGE_BYTES: usize = 256 * 1024;
 pub const MAX_RESPONSE_BYTES: usize = 512 * 1024;
 pub const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 pub const FRESHNESS: Duration = Duration::from_secs(5);
+pub(crate) const OFFLINE_GRACE: Duration = Duration::from_secs(30);
 pub(crate) const MAX_FIELD_BYTES: usize = 4096;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -316,14 +317,9 @@ fn optional_sized(value: &Option<String>) -> bool {
 }
 
 impl TernExchangeRequest {
-    /// Validate the entire inventory before touching any source or receipt.
+    /// Validate inventory shape before touching any source or receipt.
+    /// Production ingress checks the raw JSON byte limit before decoding.
     pub fn normalize(&self) -> Result<Vec<(Vec<AgentRecord>, SourceCounts)>, String> {
-        let mut counter = ResponseCounter::default();
-        serde_json::to_writer(&mut counter, self)
-            .map_err(|_| "Tern exchange request is too large".to_owned())?;
-        if counter.bytes > MAX_EXCHANGE_BYTES {
-            return Err("Tern exchange request JSON exceeds 256 KiB".into());
-        }
         if self.version != 2
             || self.kind != "tern"
             || !bounded(&self.window)

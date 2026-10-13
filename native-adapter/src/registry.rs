@@ -10,6 +10,9 @@ static NEXT_COMMAND: AtomicU64 = AtomicU64::new(0);
 pub(crate) struct TernRegistry {
     windows: HashMap<String, Window>,
     retired_epochs: HashMap<String, u64>,
+    // Keep first-loss clocks independently of child routing so an orphaned
+    // offline source still retires without weakening domain generation fences.
+    offline_sources: HashMap<String, OfflineSource>,
 }
 
 #[derive(Debug)]
@@ -23,7 +26,31 @@ pub(crate) struct Window {
     pub(crate) confirmed_sequence: Option<u64>,
     pub(crate) last_seen: Instant,
     pub(crate) offline: bool,
+    pub(crate) offline_since: Option<Instant>,
     pending: Option<Pending>,
+}
+
+#[derive(Debug)]
+struct OfflineSource {
+    generation: u64,
+    since: Instant,
+}
+
+fn record_offline(
+    sources: &mut HashMap<String, OfflineSource>,
+    source: &str,
+    generation: u64,
+    since: Instant,
+) {
+    if let Some(previous) = sources.get_mut(source) {
+        if previous.generation == generation {
+            previous.since = previous.since.min(since);
+        } else {
+            *previous = OfflineSource { generation, since };
+        }
+        return;
+    }
+    sources.insert(source.to_owned(), OfflineSource { generation, since });
 }
 
 #[derive(Debug)]
@@ -70,6 +97,7 @@ impl Default for TernRegistry {
         Self {
             windows: HashMap::new(),
             retired_epochs: HashMap::new(),
+            offline_sources: HashMap::new(),
         }
     }
 }
@@ -113,6 +141,13 @@ impl TernRegistry {
         })
     }
     pub(crate) fn remove_source(&mut self, source: &str, generation: u64) {
+        if self
+            .offline_sources
+            .get(source)
+            .is_some_and(|entry| entry.generation == generation)
+        {
+            self.offline_sources.remove(source);
+        }
         for entry in self.windows.values_mut() {
             let id = entry.hosts.iter().find_map(|(id, host)| {
                 (host.source == source && host.generation == generation).then(|| id.clone())
@@ -130,6 +165,15 @@ impl TernRegistry {
             if let Some(pending) = entry.pending.take() {
                 pending.reject(PromptError::StaleTarget);
             }
+            for host in entry.hosts.into_values() {
+                if self
+                    .offline_sources
+                    .get(&host.source)
+                    .is_some_and(|offline| offline.generation == host.generation)
+                {
+                    self.offline_sources.remove(&host.source);
+                }
+            }
             self.retired_epochs
                 .entry(window.to_owned())
                 .and_modify(|epoch| *epoch = (*epoch).max(entry.epoch))
@@ -143,16 +187,27 @@ impl TernRegistry {
             }
             for host in entry.hosts.into_values() {
                 domain.remove_source(&host.source, host.generation);
+                if self
+                    .offline_sources
+                    .get(&host.source)
+                    .is_some_and(|offline| offline.generation == host.generation)
+                {
+                    self.offline_sources.remove(&host.source);
+                }
             }
             self.retired_epochs
                 .entry(window)
                 .and_modify(|epoch| *epoch = (*epoch).max(entry.epoch))
                 .or_insert(entry.epoch);
         }
+        for (source, offline) in self.offline_sources.drain() {
+            domain.remove_source(&source, offline.generation);
+        }
     }
     pub(crate) fn clear(&mut self) {
         self.windows.clear();
         self.retired_epochs.clear();
+        self.offline_sources.clear();
     }
     #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
@@ -187,15 +242,33 @@ impl TernRegistry {
     pub(crate) fn expire(&mut self, now: Instant) -> Vec<(String, u64)> {
         let mut offline = Vec::new();
         for entry in self.windows.values_mut() {
-            let parent_expired = now.saturating_duration_since(entry.last_seen) >= FRESHNESS;
+            let parent_deadline = entry.last_seen + FRESHNESS;
+            let parent_expired = now >= parent_deadline;
             if parent_expired {
                 entry.offline = true;
+                entry.offline_since = Some(
+                    entry
+                        .offline_since
+                        .map_or(parent_deadline, |since| since.min(parent_deadline)),
+                );
             }
             let mut pending_lost = false;
             for (id, host) in &mut entry.hosts {
-                if parent_expired || now.saturating_duration_since(host.last_seen) >= FRESHNESS {
+                let host_deadline = host.last_seen + FRESHNESS;
+                if parent_expired || now >= host_deadline {
                     if !host.offline {
                         host.offline = true;
+                        let since = if parent_expired {
+                            host_deadline.min(parent_deadline)
+                        } else {
+                            host_deadline
+                        };
+                        record_offline(
+                            &mut self.offline_sources,
+                            &host.source,
+                            host.generation,
+                            since,
+                        );
                         offline.push((host.source.clone(), host.generation));
                     }
                     pending_lost |= entry
@@ -211,6 +284,105 @@ impl TernRegistry {
             }
         }
         offline
+    }
+
+    pub(crate) fn lose_host(
+        &mut self,
+        window: &str,
+        id: &str,
+        now: Instant,
+    ) -> Option<(&str, u64)> {
+        let entry = self.windows.get_mut(window).expect("registered parent");
+        if let Some(observed) = entry.observations.get_mut(id) {
+            observed.requires_new = true;
+        }
+        entry.reject_host_pending(id, PromptError::Offline);
+        let host = entry.hosts.get_mut(id)?;
+        host.offline = true;
+        record_offline(
+            &mut self.offline_sources,
+            &host.source,
+            host.generation,
+            now,
+        );
+        Some((&host.source, host.generation))
+    }
+
+    pub(crate) fn offline_window_hosts(
+        &mut self,
+        window: &str,
+        now: Instant,
+        domain: &mut dyn DomainAccess,
+    ) {
+        if let Some(entry) = self.windows.get_mut(window) {
+            for host in entry.hosts.values_mut() {
+                host.offline = true;
+                record_offline(
+                    &mut self.offline_sources,
+                    &host.source,
+                    host.generation,
+                    now,
+                );
+                domain.mark_source_offline(&host.source, host.generation);
+            }
+        }
+    }
+
+    pub(crate) fn clear_offline(&mut self, source: &str) {
+        self.offline_sources.remove(source);
+    }
+
+    /// Only the control tick prunes retention. Exchanges and pressure reclamation
+    /// keep their existing freshness-only behavior.
+    pub(crate) fn prune_offline(&mut self, domain: &mut dyn DomainAccess, now: Instant) -> bool {
+        let mut changed = false;
+        let windows = &mut self.windows;
+        self.offline_sources.retain(|source, offline| {
+            if now.saturating_duration_since(offline.since) < OFFLINE_GRACE {
+                return true;
+            }
+            let current = windows.values().all(|window| {
+                window.hosts.iter().all(|(id, host)| {
+                    host.source != *source
+                        || (host.generation == offline.generation
+                            && host.offline
+                            && !window
+                                .pending
+                                .as_ref()
+                                .is_some_and(|pending| pending.host == *id))
+                })
+            });
+            if !current || !domain.remove_offline_source(source, offline.generation) {
+                return true;
+            }
+            for window in windows.values_mut() {
+                window.hosts.retain(|_, host| {
+                    host.source != *source || host.generation != offline.generation
+                });
+            }
+            changed = true;
+            false
+        });
+        let retired_epochs = &mut self.retired_epochs;
+        windows.retain(|id, window| {
+            if window.offline
+                && window.hosts.is_empty()
+                && window.pending.is_none()
+                && window
+                    .offline_since
+                    .is_some_and(|since| now.saturating_duration_since(since) >= OFFLINE_GRACE)
+            {
+                retired_epochs
+                    .entry(id.clone())
+                    .and_modify(|epoch| *epoch = (*epoch).max(window.epoch))
+                    .or_insert(window.epoch);
+                changed = true;
+                false
+            } else {
+                true
+            }
+        });
+        changed
     }
     pub(crate) fn queue(
         &mut self,
@@ -391,6 +563,7 @@ impl Window {
             confirmed_sequence: None,
             last_seen: now,
             offline: false,
+            offline_since: None,
             pending: None,
         }
     }
@@ -649,5 +822,36 @@ mod tests {
             check_command_response("daemon-a", 1, "o", "p", "text"),
             Err(PromptError::TooLarge)
         );
+    }
+    #[test]
+    fn natural_expiry_records_the_earliest_child_or_parent_deadline() {
+        for (parent_age, host_age) in [(0, 1), (1, 0)] {
+            let mut registry = TernRegistry::default();
+            let base = Instant::now();
+            let parent_seen = base + std::time::Duration::from_secs(parent_age);
+            let mut window = test_window(1, parent_seen);
+            window.hosts.get_mut("0").unwrap().last_seen =
+                base + std::time::Duration::from_secs(host_age);
+            registry.insert("window-a".into(), window);
+            let now = base + FRESHNESS + OFFLINE_GRACE;
+            assert_eq!(registry.expire(now), vec![(source_id("window-a", "0"), 1)]);
+            assert_eq!(
+                registry.offline_sources[&source_id("window-a", "0")].since,
+                base + FRESHNESS
+            );
+            assert_eq!(
+                registry.get("window-a").unwrap().offline_since,
+                Some(parent_seen + FRESHNESS)
+            );
+            assert!(registry.expire(now + OFFLINE_GRACE).is_empty());
+            assert_eq!(
+                registry.offline_sources[&source_id("window-a", "0")].since,
+                base + FRESHNESS
+            );
+            assert_eq!(
+                registry.get("window-a").unwrap().offline_since,
+                Some(parent_seen + FRESHNESS)
+            );
+        }
     }
 }

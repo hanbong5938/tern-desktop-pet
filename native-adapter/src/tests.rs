@@ -320,6 +320,58 @@ impl Fixture {
             .unwrap();
         serde_json::from_slice(&bytes).unwrap()
     }
+    fn exchange_at(&self, request: &TernExchangeRequest, now: Instant) -> TernExchangeReply {
+        let normalized = request.normalize();
+        let mut reply = None;
+        self.runtime
+            .with_domain(&mut |domain| {
+                let state = match self.integration.state.lock() {
+                    Ok(state) => state,
+                    Err(error) => panic!("fixture registry poisoned: {error}"),
+                };
+                reply = Some(match &normalized {
+                    Ok(snapshots) => exchange_transaction(
+                        &self.integration,
+                        domain,
+                        state,
+                        request,
+                        snapshots,
+                        now,
+                    ),
+                    Err(detail) => TernExchangeReply::error(
+                        domain.instance_id().into(),
+                        TernExchangeErrorCode::Rejected,
+                        detail.clone(),
+                    ),
+                });
+            })
+            .unwrap();
+        reply.unwrap()
+    }
+    fn with_state<T>(&self, operation: impl FnOnce(&mut Domain, &mut RegistryState) -> T) -> T {
+        let mut domain = match self.runtime.domain.lock() {
+            Ok(domain) => domain,
+            Err(error) => panic!("fixture domain poisoned: {error}"),
+        };
+        let mut state = match self.integration.state.lock() {
+            Ok(state) => state,
+            Err(error) => panic!("fixture registry poisoned: {error}"),
+        };
+        operation(&mut domain, &mut state)
+    }
+    fn seen_at(&self, window: &str, host: Option<&str>, now: Instant) {
+        self.with_state(|_, state| {
+            let entry = state.registry.get_mut(window).unwrap();
+            if let Some(id) = host {
+                entry.hosts.get_mut(id).unwrap().last_seen = now;
+            } else {
+                entry.last_seen = now;
+                for host in entry.hosts.values_mut() {
+                    host.last_seen = now;
+                }
+            }
+        });
+    }
     fn key(&self, window: &str) -> SessionKey {
         let domain = self.runtime.domain.lock().unwrap();
         let source = &domain.sources[&protocol::source_id(window, "0")];
@@ -397,7 +449,7 @@ fn inventory_with_json_bytes(bytes: usize) -> TernExchangeRequest {
     }
     assert_eq!(remaining, 0);
     assert_eq!(serde_json::to_vec(&inventory).unwrap().len(), bytes);
-    assert_eq!(inventory.normalize().is_ok(), bytes <= MAX_EXCHANGE_BYTES);
+    assert!(inventory.normalize().is_ok());
     inventory
 }
 
@@ -1444,5 +1496,612 @@ fn hostile_empty_label_uses_adapter_owned_numeric_host_fallback() {
             .descriptor
             .label,
         "0"
+    );
+}
+
+#[test]
+fn offline_grace_uses_freshness_deadline_even_on_a_late_first_tick() {
+    use protocol::OFFLINE_GRACE;
+    for late_first_tick in [false, true] {
+        for offered in [false, true] {
+            let fixture = Fixture::new();
+            let base = Instant::now();
+            let mut poll = request("deadline");
+            assert!(fixture.exchange_at(&poll, base).ok);
+            let source = protocol::source_id("deadline", "0");
+            let receipt = fixture
+                .integration
+                .submit_prompt(fixture.key("deadline"), "only once".into())
+                .unwrap();
+            poll.instance_id = Some("daemon-a".into());
+            poll.sequence = 2;
+            let command = if offered {
+                fixture.exchange_at(&poll, base).command
+            } else {
+                None
+            };
+            let deadline = base + FRESHNESS + OFFLINE_GRACE;
+            fixture
+                .integration
+                .tick(base + FRESHNESS - Duration::from_nanos(1));
+            if !late_first_tick {
+                fixture.integration.tick(base + FRESHNESS);
+                fixture.with_state(|domain, state| {
+                    assert!(!domain.sources[&source].connected);
+                    assert_eq!(
+                        state.registry.get("deadline").unwrap().offline_since,
+                        Some(base + FRESHNESS)
+                    );
+                    expire(domain, &mut state.registry, deadline);
+                    assert!(
+                        domain.sources.contains_key(&source),
+                        "exchange expiry never prunes retention"
+                    );
+                });
+                fixture.integration.tick(deadline - Duration::from_nanos(1));
+                fixture.with_state(|domain, _| assert!(domain.sources.contains_key(&source)));
+            }
+            fixture.integration.tick(deadline);
+            assert_eq!(
+                receipt.try_recv(),
+                Ok(Err(if offered {
+                    PromptError::UnknownDelivery
+                } else {
+                    PromptError::Offline
+                }))
+            );
+            fixture.with_state(|domain, state| {
+                assert!(!domain.sources.contains_key(&source));
+                assert_eq!(domain.retired.get(&source), Some(&1));
+                assert!(state.registry.get("deadline").is_none());
+                assert_eq!(state.registry.retired_epoch("deadline"), Some(1));
+            });
+            if let Some(command) = command {
+                poll.results.push(TernResult {
+                    operation_id: command.operation_id,
+                    pane: command.pane,
+                    status: TernResultStatus::Accepted,
+                    error: None,
+                });
+            }
+            poll.sequence = 3;
+            assert_eq!(
+                fixture.exchange_at(&poll, deadline).error_code,
+                Some(TernExchangeErrorCode::SourceRetired)
+            );
+            assert_eq!(receipt.try_recv(), Err(mpsc::TryRecvError::Disconnected));
+        }
+    }
+}
+
+#[test]
+fn repeated_explicit_loss_preserves_deadline_and_recovery_starts_a_new_episode() {
+    use protocol::OFFLINE_GRACE;
+    for loss in [
+        Some(TernHostStatus::Disconnected),
+        Some(TernHostStatus::Unavailable),
+        None,
+    ] {
+        let fixture = Fixture::new();
+        let base = Instant::now();
+        let mut poll = request("episodes");
+        poll.hosts.push(remote_host("1"));
+        assert!(fixture.exchange_at(&poll, base).ok);
+        let remote = protocol::source_id("episodes", "1");
+        let saved = poll.hosts[1].clone();
+        let local = fixture.key("episodes");
+        let old = host_key(&fixture, "episodes", "1");
+        poll.instance_id = Some("daemon-a".into());
+        poll.sequence = 2;
+        if let Some(status) = loss {
+            poll.hosts[1].status = status;
+            poll.hosts[1].agents.clear();
+        } else {
+            poll.hosts.remove(1);
+        }
+        let first_loss = base + Duration::from_secs(1);
+        assert!(fixture.exchange_at(&poll, first_loss).ok);
+        let repeated = base + Duration::from_secs(25);
+        fixture.seen_at("episodes", Some("0"), repeated);
+        fixture.with_state(|_, state| {
+            state.registry.get_mut("episodes").unwrap().last_seen = repeated
+        });
+        poll.sequence = 3;
+        assert!(fixture.exchange_at(&poll, repeated).ok);
+        let mut recovered = saved;
+        recovered.observation_generation = 2;
+        if loss.is_none() {
+            poll.hosts.push(recovered);
+        } else {
+            poll.hosts[1] = recovered;
+        }
+        poll.sequence = 4;
+        assert!(fixture
+            .exchange_at(&poll, base + Duration::from_secs(29))
+            .hosts[1]
+            .error
+            .is_none());
+        assert_ne!(host_key(&fixture, "episodes", "1"), old);
+        assert_eq!(fixture.key("episodes"), local);
+        poll.sequence = 5;
+        poll.hosts[1].status = TernHostStatus::Disconnected;
+        poll.hosts[1].agents.clear();
+        let second_loss = base + Duration::from_secs(30);
+        assert!(fixture.exchange_at(&poll, second_loss).ok);
+        fixture.seen_at("episodes", Some("0"), second_loss + OFFLINE_GRACE);
+        fixture.with_state(|_, state| {
+            state.registry.get_mut("episodes").unwrap().last_seen = second_loss + OFFLINE_GRACE
+        });
+        fixture.integration.tick(first_loss + OFFLINE_GRACE);
+        fixture.with_state(|domain, _| assert!(domain.sources.contains_key(&remote)));
+        fixture.integration.tick(second_loss + OFFLINE_GRACE);
+        fixture.with_state(|domain, state| {
+            assert!(!domain.sources.contains_key(&remote));
+            let parent = state.registry.get("episodes").unwrap();
+            assert!(parent.bound && !parent.offline && parent.observations["1"].requires_new);
+            assert!(!parent.hosts.contains_key("1"));
+        });
+        assert_eq!(fixture.key("episodes"), local);
+    }
+}
+
+#[test]
+fn remote_grace_pruning_preserves_live_parent_local_pending_and_receipts() {
+    use protocol::OFFLINE_GRACE;
+    for offered in [false, true] {
+        let fixture = Fixture::new();
+        let base = Instant::now();
+        let mut poll = request("remote-grace");
+        poll.hosts.push(remote_host("1"));
+        assert!(fixture.exchange_at(&poll, base).ok);
+        let local = fixture.key("remote-grace");
+        let remote = host_key(&fixture, "remote-grace", "1");
+        let receipt = fixture
+            .integration
+            .submit_prompt(local.clone(), "local survives".into())
+            .unwrap();
+        poll.instance_id = Some("daemon-a".into());
+        poll.sequence = 2;
+        let mut command = if offered {
+            fixture.exchange_at(&poll, base).command
+        } else {
+            None
+        };
+        let deadline = base + FRESHNESS + OFFLINE_GRACE;
+        fixture.seen_at("remote-grace", None, deadline);
+        fixture.seen_at("remote-grace", Some("1"), base);
+        fixture.integration.tick(deadline);
+        fixture.with_state(|domain, state| {
+            assert!(!domain
+                .sources
+                .contains_key(&protocol::source_id("remote-grace", "1")));
+            let parent = state.registry.get("remote-grace").unwrap();
+            assert!(parent.bound && !parent.offline && parent.observations.contains_key("1"));
+            assert_eq!(parent.hosts.len(), 1);
+        });
+        assert_eq!(receipt.try_recv(), Err(mpsc::TryRecvError::Empty));
+        poll.sequence = 3;
+        if let Some(command) = &command {
+            poll.results.push(TernResult {
+                operation_id: command.operation_id.clone(),
+                pane: command.pane.clone(),
+                status: TernResultStatus::Accepted,
+                error: None,
+            });
+        }
+        let recovered = fixture.exchange_at(&poll, deadline);
+        assert!(recovered.ok && recovered.hosts[1].error.is_none());
+        assert!(recovered.hosts[1].generation > remote.generation);
+        assert_eq!(fixture.key("remote-grace"), local);
+        if !offered {
+            command = recovered.command;
+            let command = command.unwrap();
+            poll.sequence = 4;
+            poll.results.push(TernResult {
+                operation_id: command.operation_id,
+                pane: command.pane,
+                status: TernResultStatus::Accepted,
+                error: None,
+            });
+            assert!(fixture.exchange_at(&poll, deadline).ok);
+        }
+        assert_eq!(receipt.try_recv(), Ok(Ok(PromptReceipt::Accepted)));
+        fixture.with_state(|domain, _| {
+            assert!(domain.completions.is_empty() && domain.outcomes.is_empty())
+        });
+    }
+}
+
+#[test]
+fn epoch_omissions_keep_prior_deadlines_and_start_newly_lost_children() {
+    use protocol::OFFLINE_GRACE;
+    let fixture = Fixture::new();
+    let base = Instant::now();
+    let mut poll = request("epoch-loss");
+    poll.hosts.push(remote_host("1"));
+    poll.hosts.push(remote_host("2"));
+    assert!(fixture.exchange_at(&poll, base).ok);
+    poll.instance_id = Some("daemon-a".into());
+    poll.sequence = 2;
+    poll.hosts.remove(1);
+    let first_loss = base + Duration::from_secs(1);
+    assert!(fixture.exchange_at(&poll, first_loss).ok);
+    poll.epoch = 2;
+    poll.sequence = 1;
+    poll.hosts.truncate(1);
+    let epoch_loss = base + Duration::from_secs(2);
+    assert!(fixture.exchange_at(&poll, epoch_loss).ok);
+    fixture.seen_at("epoch-loss", None, epoch_loss + OFFLINE_GRACE);
+    fixture.integration.tick(first_loss + OFFLINE_GRACE);
+    fixture.with_state(|domain, _| {
+        assert!(!domain
+            .sources
+            .contains_key(&protocol::source_id("epoch-loss", "1")));
+        assert!(domain
+            .sources
+            .contains_key(&protocol::source_id("epoch-loss", "2")));
+    });
+    fixture.integration.tick(epoch_loss + OFFLINE_GRACE);
+    fixture.with_state(|domain, state| {
+        assert!(!domain
+            .sources
+            .contains_key(&protocol::source_id("epoch-loss", "2")));
+        let parent = state.registry.get("epoch-loss").unwrap();
+        assert_eq!(parent.epoch, 2);
+        assert!(!parent.offline);
+        assert_eq!(parent.hosts.len(), 1);
+        assert_eq!(parent.hosts["0"].generation, 2);
+    });
+}
+
+#[test]
+fn grace_pruning_skips_mismatched_or_live_generations_but_removes_orphans() {
+    use protocol::OFFLINE_GRACE;
+    for mismatch in ["domain", "registry", "live-registry"] {
+        let fixture = Fixture::new();
+        let base = Instant::now();
+        let mut poll = request("mismatch");
+        poll.hosts.push(remote_host("1"));
+        poll.hosts.push(remote_host("2"));
+        assert!(fixture.exchange_at(&poll, base).ok);
+        let deadline = base + FRESHNESS + OFFLINE_GRACE;
+        fixture.integration.tick(base + FRESHNESS);
+        fixture.with_state(|domain, state| {
+            let parent = state.registry.get_mut("mismatch").unwrap();
+            parent.hosts.remove("2");
+            match mismatch {
+                "domain" => {
+                    domain
+                        .sources
+                        .get_mut(&protocol::source_id("mismatch", "1"))
+                        .unwrap()
+                        .generation = 2
+                }
+                "registry" => parent.hosts.get_mut("1").unwrap().generation = 2,
+                "live-registry" => {
+                    parent.offline = false;
+                    parent.offline_since = None;
+                    parent.last_seen = deadline;
+                    let host = parent.hosts.get_mut("1").unwrap();
+                    host.offline = false;
+                    host.last_seen = deadline;
+                }
+                _ => unreachable!(),
+            }
+            assert!(domain.begin_source(
+                SourceDescriptor {
+                    id: "other-offline".into(),
+                    provider: "herdr".into(),
+                    label: "Other".into(),
+                    locality: SourceLocality::Local,
+                    capabilities: SourceCapabilities {
+                        prompt: true,
+                        remove_worktree: true
+                    },
+                },
+                1
+            ));
+            domain.mark_source_offline("other-offline", 1);
+        });
+        fixture.integration.tick(deadline);
+        fixture.with_state(|domain, state| {
+            assert!(!domain
+                .sources
+                .contains_key(&protocol::source_id("mismatch", "0")));
+            assert!(!domain
+                .sources
+                .contains_key(&protocol::source_id("mismatch", "2")));
+            assert!(domain
+                .sources
+                .contains_key(&protocol::source_id("mismatch", "1")));
+            assert!(domain.sources.contains_key("other-offline"));
+            assert_eq!(state.registry.get("mismatch").unwrap().hosts.len(), 1);
+            assert_eq!(state.registry.retired_epoch("mismatch"), None);
+        });
+    }
+}
+
+#[test]
+fn invalid_parent_envelopes_cannot_age_pending_or_prune_offline_retention() {
+    use protocol::OFFLINE_GRACE;
+    let fixture = Fixture::new();
+    let base = Instant::now();
+    let mut poll = request("invalid-parent");
+    assert!(fixture.exchange_at(&poll, base).ok);
+    let receipt = fixture
+        .integration
+        .submit_prompt(fixture.key("invalid-parent"), "pending".into())
+        .unwrap();
+    poll.instance_id = Some("daemon-a".into());
+    poll.sequence = 2;
+    let command = fixture.exchange_at(&poll, base).command.unwrap();
+    poll.sequence = 3;
+    let mut invalid = Vec::new();
+    let mut malformed = poll.clone();
+    malformed.version = 1;
+    invalid.push(malformed);
+    let mut stale = poll.clone();
+    stale.sequence = 2;
+    invalid.push(stale);
+    let mut wrong = poll.clone();
+    wrong.instance_id = Some("other-daemon".into());
+    invalid.push(wrong);
+    let mut unbound = poll.clone();
+    unbound.instance_id = None;
+    invalid.push(unbound);
+    let mut unknown = poll.clone();
+    unknown.results.push(TernResult {
+        operation_id: "not-offered".into(),
+        pane: command.pane.clone(),
+        status: TernResultStatus::Accepted,
+        error: None,
+    });
+    invalid.push(unknown);
+    let mut new_epoch = poll.clone();
+    new_epoch.epoch = 2;
+    new_epoch.sequence = 1;
+    new_epoch.results.push(TernResult {
+        operation_id: command.operation_id.clone(),
+        pane: command.pane.clone(),
+        status: TernResultStatus::Accepted,
+        error: None,
+    });
+    let deadline = base + FRESHNESS + OFFLINE_GRACE;
+    assert_eq!(
+        fixture.exchange_at(&new_epoch, deadline).error_code,
+        Some(TernExchangeErrorCode::Rejected)
+    );
+    let revision = fixture.with_state(|domain, _| domain.revision);
+    for request in &invalid {
+        assert!(!fixture.exchange_at(request, deadline).ok);
+        assert_eq!(receipt.try_recv(), Err(mpsc::TryRecvError::Empty));
+        fixture.with_state(|domain, state| {
+            assert_eq!(domain.revision, revision);
+            let parent = state.registry.get("invalid-parent").unwrap();
+            assert_eq!(parent.sequence, 2);
+            assert_eq!(parent.last_seen, base);
+            assert_eq!(parent.offline_since, None);
+            assert!(!parent.offline);
+        });
+    }
+    fixture.integration.tick(base + FRESHNESS);
+    assert_eq!(receipt.try_recv(), Ok(Err(PromptError::UnknownDelivery)));
+    for request in &invalid {
+        assert!(!fixture.exchange_at(request, deadline).ok);
+    }
+    fixture.with_state(|domain, state| {
+        assert!(domain
+            .sources
+            .contains_key(&protocol::source_id("invalid-parent", "0")));
+        assert_eq!(
+            state.registry.get("invalid-parent").unwrap().offline_since,
+            Some(base + FRESHNESS)
+        );
+    });
+    fixture.integration.tick(deadline);
+    fixture.with_state(|domain, _| assert!(domain.sources.is_empty()));
+}
+
+#[test]
+fn coherent_recovery_wins_only_if_it_commits_before_retention_pruning() {
+    use protocol::OFFLINE_GRACE;
+    for prune_first in [false, true] {
+        let fixture = Fixture::new();
+        let base = Instant::now();
+        let mut poll = request("recovery-order");
+        assert!(fixture.exchange_at(&poll, base).ok);
+        fixture.integration.tick(base + FRESHNESS);
+        let overdue = base + FRESHNESS + OFFLINE_GRACE + Duration::from_secs(1);
+        poll.instance_id = Some("daemon-a".into());
+        poll.sequence = 2;
+        if prune_first {
+            fixture.integration.tick(overdue);
+            assert_eq!(
+                fixture.exchange_at(&poll, overdue).error_code,
+                Some(TernExchangeErrorCode::SourceRetired)
+            );
+        } else {
+            let recovered = fixture.exchange_at(&poll, overdue);
+            assert!(recovered.ok && recovered.command.is_none());
+            assert_eq!(recovered.hosts[0].generation, 2);
+            fixture.integration.tick(overdue);
+            fixture.with_state(|domain, state| {
+                assert!(domain.sources[&protocol::source_id("recovery-order", "0")].connected);
+                assert_eq!(
+                    state.registry.get("recovery-order").unwrap().offline_since,
+                    None
+                );
+                assert_eq!(state.registry.retired_epoch("recovery-order"), None);
+            });
+        }
+    }
+}
+
+#[test]
+fn maintenance_prunes_without_registration_and_preserves_live_empty_hosts() {
+    use protocol::OFFLINE_GRACE;
+    let fixture = Fixture::new();
+    let base = Instant::now();
+    for index in 0..MAX_SOURCES {
+        let mut poll = request(&format!("window-{index}"));
+        poll.hosts[0].agents.clear();
+        assert!(fixture.exchange_at(&poll, base).ok);
+    }
+    let deadline = base + FRESHNESS + OFFLINE_GRACE;
+    fixture.seen_at("window-0", None, deadline);
+    fixture.integration.tick(deadline);
+    fixture.with_state(|domain, state| {
+        assert_eq!(domain.sources.len(), 1);
+        assert_eq!(state.registry.len(), 1);
+        assert!(domain.sources[&protocol::source_id("window-0", "0")].connected);
+    });
+    let mut empty = request("empty-parent");
+    empty.hosts[0].status = TernHostStatus::Unavailable;
+    empty.hosts[0].agents.clear();
+    assert!(fixture.exchange_at(&empty, base).ok);
+    fixture.integration.tick(deadline);
+    fixture.with_state(|_, state| {
+        assert!(state.registry.get("empty-parent").is_none());
+        assert_eq!(state.registry.retired_epoch("empty-parent"), Some(1));
+    });
+}
+
+#[test]
+fn helper_success_requires_the_bound_daemon_instance_but_failure_can_report_change() {
+    let success = json!({"ok":true,"instance_id":"other-daemon","hosts":[{"host":"0","observation_generation":1,"generation":1,"error":null}],"command":null,"error":null});
+    assert!(peer_reply(success)
+        .unwrap_err()
+        .contains("invalid Tern exchange response fields"));
+    let changed = json!({"ok":false,"instance_id":"other-daemon","hosts":[],"command":null,"error":"daemon instance changed","error_code":"instance_changed"});
+    assert_eq!(
+        peer_reply(changed).unwrap().error_code,
+        Some(TernExchangeErrorCode::InstanceChanged)
+    );
+}
+
+#[test]
+fn repeated_loss_does_not_extend_the_first_valid_offline_deadline() {
+    use protocol::OFFLINE_GRACE;
+    for loss in [TernHostStatus::Disconnected, TernHostStatus::Unavailable] {
+        let fixture = Fixture::new();
+        let base = Instant::now();
+        let mut poll = request("repeat-loss");
+        poll.hosts.push(remote_host("1"));
+        assert!(fixture.exchange_at(&poll, base).ok);
+        poll.instance_id = Some("daemon-a".into());
+        poll.sequence = 2;
+        poll.hosts[1].status = loss;
+        poll.hosts[1].agents.clear();
+        let first_loss = base + Duration::from_secs(1);
+        assert!(fixture.exchange_at(&poll, first_loss).ok);
+        let repeated = first_loss + OFFLINE_GRACE - Duration::from_nanos(1);
+        fixture.seen_at("repeat-loss", None, repeated);
+        poll.sequence = 3;
+        assert!(fixture.exchange_at(&poll, repeated).ok);
+        fixture.integration.tick(repeated);
+        fixture.with_state(|domain, _| {
+            assert!(domain
+                .sources
+                .contains_key(&protocol::source_id("repeat-loss", "1")))
+        });
+        fixture.integration.tick(first_loss + OFFLINE_GRACE);
+        fixture.with_state(|domain, state| {
+            assert!(!domain
+                .sources
+                .contains_key(&protocol::source_id("repeat-loss", "1")));
+            assert!(domain.sources[&protocol::source_id("repeat-loss", "0")].connected);
+            assert!(state.registry.get("repeat-loss").is_some());
+        });
+    }
+}
+
+#[test]
+fn compact_raw_request_budget_is_not_recounted_with_missing_optional_fields() {
+    let fixture = Fixture::new();
+    let mut wire = serde_json::to_value(inventory_with_json_bytes(MAX_EXCHANGE_BYTES)).unwrap();
+    let agents = wire["hosts"][0]["agents"].as_array_mut().unwrap();
+    for agent in agents {
+        for field in ["session_label", "tab_id", "tab_label", "delivery_error"] {
+            assert!(agent
+                .as_object_mut()
+                .unwrap()
+                .remove(field)
+                .unwrap()
+                .is_null());
+        }
+    }
+    let mut remaining = MAX_EXCHANGE_BYTES - serde_json::to_vec(&wire).unwrap().len();
+    for agent in wire["hosts"][0]["agents"].as_array_mut().unwrap() {
+        let title = agent["title"].as_str().unwrap();
+        let extra = remaining.min(protocol::MAX_FIELD_BYTES - title.len());
+        agent["title"] = json!(format!("{title}{}", "x".repeat(extra)));
+        remaining -= extra;
+    }
+    assert_eq!(remaining, 0);
+    let frame = serde_json::to_vec(&wire).unwrap();
+    assert_eq!(frame.len(), MAX_EXCHANGE_BYTES);
+    let typed = decode_exchange_request(&frame).unwrap();
+    assert!(serde_json::to_vec(&typed).unwrap().len() > MAX_EXCHANGE_BYTES);
+    let reply: TernExchangeReply = serde_json::from_slice(
+        &fixture
+            .integration
+            .exchange_handler()
+            .handle_frame(&frame)
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(reply.ok && reply.hosts[0].error.is_none());
+}
+
+#[test]
+fn grouped_agent_limit_and_normalization_preserve_metadata_per_host() {
+    let mut poll = request("metadata");
+    poll.hosts.push(remote_host("1"));
+    for host in &mut poll.hosts {
+        let mut agent = host.agents[0].clone();
+        agent.title = "제목".into();
+        agent.cwd = "/same/worktree".into();
+        agent.session_id = Some("same-session".into());
+        agent.session_label = Some("Workspace".into());
+        agent.tab_id = Some("same-tab".into());
+        agent.tab_label = Some("Tab label".into());
+        agent.delivery_error = Some("delivery metadata is not an outcome".into());
+        host.agents = (0..protocol::MAX_HOST_AGENTS)
+            .map(|index| TernAgent {
+                pane: format!("pane-{index}"),
+                state: TernAgentState::WaitingInput,
+                ..agent.clone()
+            })
+            .collect();
+    }
+    let snapshots = poll.normalize().unwrap();
+    for (records, counts) in snapshots {
+        assert_eq!(records.len(), protocol::MAX_HOST_AGENTS);
+        assert_eq!(counts.sessions as usize, protocol::MAX_HOST_AGENTS);
+        assert_eq!(counts.blocked as usize, protocol::MAX_HOST_AGENTS);
+        let record = &records[0];
+        assert_eq!(record.terminal_id, "pane-0");
+        assert_eq!(record.pane_id, "pane-0");
+        assert_eq!(record.metadata.title.as_deref(), Some("제목"));
+        assert_eq!(record.metadata.cwd.as_deref(), Some("/same/worktree"));
+        assert_eq!(
+            record.metadata.workspace_id.as_deref(),
+            Some("same-session")
+        );
+        assert_eq!(
+            record.metadata.workspace_label.as_deref(),
+            Some("Workspace")
+        );
+        assert_eq!(record.metadata.tab_id.as_deref(), Some("same-tab"));
+        assert_eq!(record.metadata.tab_label.as_deref(), Some("Tab label"));
+        assert_eq!(record.status, AgentStatus::Blocked);
+        assert!(!record.outcome_authoritative && record.outcome.is_none());
+    }
+    let mut extra = poll.hosts[1].agents[0].clone();
+    extra.pane = "too-many".into();
+    poll.hosts[1].agents.push(extra);
+    assert_eq!(
+        poll.normalize().unwrap_err(),
+        "invalid or duplicate Tern host"
     );
 }

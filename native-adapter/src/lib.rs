@@ -77,7 +77,14 @@ impl TernIntegration {
         runtime.with_domain(&mut |domain| match self.state.lock() {
             Ok(state) => {
                 reply = Some(match &normalized {
-                    Ok(snapshots) => exchange_transaction(self, domain, state, &request, snapshots),
+                    Ok(snapshots) => exchange_transaction(
+                        self,
+                        domain,
+                        state,
+                        &request,
+                        snapshots,
+                        Instant::now(),
+                    ),
                     Err(detail) => TernExchangeReply::error(
                         domain.instance_id().into(),
                         TernExchangeErrorCode::Rejected,
@@ -128,6 +135,7 @@ impl Integration for TernIntegration {
                 for (source, generation) in state.registry.expire(now) {
                     changed |= domain.mark_source_offline(&source, generation);
                 }
+                changed |= state.registry.prune_offline(domain, now);
             }
             Err(_) => eprintln!("Tern source registry lock poisoned"),
         });
@@ -293,15 +301,15 @@ fn expire(domain: &mut dyn DomainAccess, registry: &mut TernRegistry, now: Insta
     }
 }
 
-fn lose_host(domain: &mut dyn DomainAccess, registry: &mut TernRegistry, window: &str, id: &str) {
-    let entry = registry.get_mut(window).expect("registered parent");
-    if let Some(observed) = entry.observations.get_mut(id) {
-        observed.requires_new = true;
-    }
-    entry.reject_host_pending(id, PromptError::Offline);
-    if let Some(host) = entry.hosts.get_mut(id) {
-        host.offline = true;
-        domain.mark_source_offline(&host.source, host.generation);
+fn lose_host(
+    domain: &mut dyn DomainAccess,
+    registry: &mut TernRegistry,
+    window: &str,
+    id: &str,
+    now: Instant,
+) {
+    if let Some((source, generation)) = registry.lose_host(window, id, now) {
+        domain.mark_source_offline(source, generation);
     }
 }
 
@@ -342,6 +350,7 @@ fn exchange_transaction<'a>(
     mut state: std::sync::MutexGuard<'a, RegistryState>,
     request: &TernExchangeRequest,
     snapshots: &[(Vec<AgentRecord>, SourceCounts)],
+    now: Instant,
 ) -> TernExchangeReply {
     use TernExchangeErrorCode::*;
     let instance_id = domain.instance_id().to_owned();
@@ -379,7 +388,10 @@ fn exchange_transaction<'a>(
         return error(Rejected, "stale Tern window epoch or sequence");
     }
     if new_epoch && !request.results.is_empty() {
-        return error(ReceiptRejected, "results from an unrecognized Tern window");
+        return error(
+            Rejected,
+            "Tern results require the currently bound window epoch",
+        );
     }
     if !new_epoch {
         if let Err(detail) = registry.validate_result(request) {
@@ -387,18 +399,13 @@ fn exchange_transaction<'a>(
         }
     }
     // Complete structural/binding/receipt validation precedes all lifecycle mutation.
-    let now = Instant::now();
     expire(domain, registry, now);
     if new_epoch {
         if registry.get(&request.window).is_none() && !ensure_parent_capacity(domain, registry, now)
         {
             return error(Rejected, "Tern window registry is full");
         }
-        if let Some(previous) = registry.get(&request.window) {
-            for host in previous.hosts.values() {
-                domain.mark_source_offline(&host.source, host.generation);
-            }
-        }
+        registry.offline_window_hosts(&request.window, now, domain);
         registry.reject_pending(&request.window, PromptError::StaleTarget);
         let mut next = Window::new(request.epoch, now);
         if let Some(previous) = registry.get_mut(&request.window) {
@@ -418,7 +425,7 @@ fn exchange_transaction<'a>(
         .cloned()
         .collect();
     for id in omitted {
-        lose_host(domain, registry, &request.window, &id);
+        lose_host(domain, registry, &request.window, &id, now);
     }
     let mut order: Vec<usize> = (0..request.hosts.len()).collect();
     order.sort_unstable_by_key(|&index| {
@@ -481,6 +488,7 @@ fn exchange_transaction<'a>(
                 &mut state.registry,
                 &request.window,
                 &inventory.host,
+                now,
             );
             replies[index] = Some(TernHostReply::new(inventory, current_generation, None));
             continue;
@@ -561,6 +569,7 @@ fn exchange_transaction<'a>(
                 .get_mut(&request.window)
                 .expect("registered parent")
                 .reject_host_pending(&inventory.host, PromptError::StaleTarget);
+            state.registry.clear_offline(&source);
         }
         let pane_ids: Arc<[String]> = records
             .iter()
@@ -583,6 +592,7 @@ fn exchange_transaction<'a>(
             continue;
         }
         domain.set_source_label(&source, generation, label);
+        state.registry.clear_offline(&source);
         let window = state
             .registry
             .get_mut(&request.window)
@@ -623,6 +633,7 @@ fn exchange_transaction<'a>(
     window.sequence = request.sequence;
     window.last_seen = now;
     window.offline = false;
+    window.offline_since = None;
     window.last_host_reply_bytes = host_bytes;
     window.bound = true;
     if request.instance_id.is_some()
