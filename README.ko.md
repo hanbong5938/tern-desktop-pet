@@ -6,34 +6,58 @@
 
 ## 준비 및 설치
 
-Apple Silicon macOS 13+에서 [Herdr Desktop Pet 앱 소스](https://github.com/hanbong5938/herdr-desktop-pet)의 로컬 체크아웃이 필요합니다. **네이티브 연결 변경이 병합되기 전까지는 기본 브랜치가 아니라 `origin/tern-desktop-pet-integration`을 명시적으로 fetch하고 checkout하세요.** 아래 명령을 사용합니다. 앱 소스 빌드에는 Rust/Cargo, Bun, Node.js/npm, Xcode Command Line Tools, `codesign`이 필요하며 빌드 의존성을 다운로드할 수 있습니다. 소스 설치기는 앱을 앱 소스 체크아웃의 `dist/HerdrDesktopPet.app`에 빌드·패키징합니다. **플러그인과 네이티브 연결 브랜치를 공개했다고 기존 공개 바이너리가 업그레이드되지는 않습니다. 해당 브랜치에서 네이티브 앱을 별도로 소스 빌드하세요. 기존 공개/사전 빌드 앱으로 대체하지 마세요.** 이 연결에는 `tern-exchange`, `--host tern`, `update-capabilities`의 `protocol: 3` 및 `observation_mode: 1`을 지원하는 네이티브 CLI가 필요합니다. 구형 앱에서 `tern-exchange`가 알 수 없는 명령으로 나오면 이 플러그인과 작동하지 않습니다. 앱을 빌드해도 플러그인 체크아웃에 복사되지 않습니다.
+Apple Silicon macOS 13+에서 별도로 설치한 [Herdr Desktop Pet 네이티브 앱](https://github.com/hanbong5938/herdr-desktop-pet) **0.3.6 이상**이 필요합니다. 기본 설치 경로는 Homebrew의 사전 빌드 네이티브 앱을 설치한 뒤 공개 Tern 플러그인을 설치하는 **두 번의 명시적 설치**입니다. 플러그인은 앱을 몰래 다운로드하거나 앱 설치기를 실행하거나 앱을 빌드하지 않습니다. 이 바이너리 경로에는 네이티브 소스 체크아웃, Rust/Cargo, Bun, Node.js/npm이 필요하지 않습니다. 네이티브 CLI는 `tern-exchange`, `--host tern`과 `update-capabilities`의 **두 필드** `protocol: 3`, `observation_mode: 1`을 지원해야 합니다. 구형 앱에서 `tern-exchange`가 알 수 없는 명령으로 나오면 이 플러그인과 작동하지 않습니다.
+
+[v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6)은 검증된 공개 arm64 자산·체크섬과 갱신된 안정판 Homebrew 포뮬러를 갖춘 최신 공개 안정판입니다. 일치하는 앱·도우미 쌍은 `protocol: 3`, `observation_mode: 1`을 보고합니다. 과거 v0.3.5와 베타 자산은 변경하지 않습니다. 공개 플러그인 설치와 네이티브 앱 설치는 별개이며 기존 바이너리는 명시적으로 업그레이드해야 합니다.
+
+**공개 소비자 경로 검증:** 실제 안정판 Brew 0.3.5 → 0.3.6 업그레이드가 성공했으며 공개 고정 `--prebuilt` 설치기는 시스템 도구만 있는 `PATH`에서 완료됐습니다(Cargo·Bun·Node.js·npm 없음). 두 설치 앱 모두 별도 비공개 Tern config/state 프로필에서 `app_version: 0.3.6`, `observation_mode: tern`, `ui_ready: true`로 시작했고 설정된 Herdr 소켓의 부모 디렉터리도 필요하지 않았습니다. 유효한 빈 exchange-v1 스냅샷은 `command: null`로 수락됐으며 일반 Stop으로 깨끗하게 종료됐습니다. 실제 공개 플러그인 URL로 격리 Tern 설정에 0.1.0을 설치했고 카탈로그는 문제 없이 준비됐습니다. 이는 해당 소비자 경로의 근거이며 GUI 플러그인 창 연결·에이전트 목록/모델 전달·전체 업데이트 거래·일반 인증의 근거는 아닙니다. 기존 사용자 프로필은 변경하지 않았습니다.
 
 현재 Tern은 로그인이 필요한 비공개 베타입니다. 정당하게 부여받은 베타 접근 권한으로 호환 Tern을 설치·실행하고 정상적으로 로그인해야 하며 인증을 우회하지 마세요. 매니페스트 링크나 로그아웃 상태의 빈 창만으로 기능을 검증할 수는 없습니다. 여기서는 특정 최소 Tern 버전이나 공개 배포를 보장하지 않습니다.
 
 **이전에 수행한 로컬 실제 에이전트 검증:** 로그인된 기존 Tern 0.6.1 창에서 분리된 검증 프로필을 사용해 로컬 에이전트 pane이 창 플러그인과 네이티브 펫에 표시되는 것을 확인했습니다. 임시 탭의 에이전트에게 의미 기반 질문을 보내자 네이티브 상태에 `prompt_accepted`, 전달 상태에 `accepted_may_be_queued`가 나타났습니다. 이후 실제 Tern 에이전트 대화 기록에서 요청한 `TERN_PET_SMOKE_OK` 답변을 확인했고, 에이전트 상태는 일치하는 마지막 메시지를 가진 idle이었습니다. 대화 기록은 이 특정 답변의 전달을 별도로 확인해 주지만, 접수 상태나 idle 상태만으로 완료를 확정할 수는 없습니다. 이 과거 관측은 아래의 현재 수정 회귀 검증과 별개입니다. 공개 릴리스나 최소 버전 보증이 아닌, 공개되지 않은 로컬 소스의 검증입니다.
 
-셸에서 `PET_SOURCE`를 네이티브 체크아웃의 **실제 절대 경로**로 지정하세요(새로 clone할 때는 아직 사용하지 않는 디렉터리). 모든 네이티브 명령과 Tern 플러그인 설정에서 동일한 네이티브 config/state 경로를 사용합니다. 새 네이티브 체크아웃은 아래의 `git clone`부터 실행하세요. 기존 체크아웃이라면 그 clone 명령만 건너뛰고, 빌드 전에 반드시 정확한 연결 브랜치를 fetch하고 checkout하세요.
+네이티브 앱을 먼저 설치하고 플러그인을 설치하세요. formula가 이미 설치되어 있다면 첫 명령 대신 `brew update && brew upgrade hanbong5938/tap/herdr-desktop-pet`를 사용합니다. 모든 네이티브 명령과 Tern 명령 팔레트 설정에서 동일하게 분리된 네이티브 config/state 경로를 사용하세요: 기존 네이티브 프로필·환경설정은 유지됩니다.
 
 ```sh
-PET_SOURCE=/absolute/path/to/herdr-desktop-pet-source
+brew install hanbong5938/tap/herdr-desktop-pet
+tern plugin install https://github.com/hanbong5938/tern-desktop-pet
+
+PET_BIN="$(command -v herdr-desktop-pet)"
 PET_CONFIG="$HOME/.config/tern-desktop-pet/native"
 PET_STATE="$HOME/.local/state/tern-desktop-pet/native"
 
-git clone https://github.com/hanbong5938/herdr-desktop-pet.git "$PET_SOURCE"
-cd "$PET_SOURCE"
-git fetch origin tern-desktop-pet-integration
-git checkout --detach origin/tern-desktop-pet-integration
-bash scripts/install.sh --source
-PET_BIN="$PET_SOURCE/dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet"
+"$PET_BIN" --version
 "$PET_BIN" update-capabilities
+# 0.3.6 이상, protocol: 3, observation_mode: 1을 확인한 뒤에만 계속하세요.
 "$PET_BIN" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" settings set exit_with_herdr off
 "$PET_BIN" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" start
 "$PET_BIN" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" status
 
-tern plugin install https://github.com/hanbong5938/tern-desktop-pet
 tern plugin reload
 tern plugin list
 ```
+
+앱을 시작하기 **전에** 버전이 **0.3.6 이상**이고 capability에 **두 필드**가 모두 있는지 확인하세요. 위 명령 실행만으로 확인을 대신할 수는 없습니다. 공용 네이티브 앱의 기본 모드는 Herdr이므로 `--host tern`을 명시적으로 유지하세요. 다음으로 로그인된 Tern 창을 열고 명령 팔레트의 **Configure desktop pet connection** (`configure`)에서 아래 설명대로 `PET_BIN`과 분리된 두 경로의 확장된 값을 저장하세요. 셸 변수만으로 플러그인이 설정되지는 않습니다.
+
+### 소스 개발용 대안
+
+선택형 네이티브 소스 개발에는 Rust/Cargo, Bun, Node.js/npm, Xcode Command Line Tools와 `codesign`이 필요하며 의존성을 내려받을 수 있습니다. `PET_SOURCE`를 실제 절대 경로로 지정하고 새 clone에는 미사용 디렉터리를 사용하세요. 아래 공개 v0.3.6 태그를 빌드하며 별도 연동 브랜치는 필요하지 않습니다:
+
+```sh
+PET_SOURCE=/absolute/path/to/herdr-desktop-pet-source
+git clone https://github.com/hanbong5938/herdr-desktop-pet.git "$PET_SOURCE"
+cd "$PET_SOURCE"
+git fetch origin tag v0.3.6
+git checkout --detach v0.3.6
+bash scripts/install.sh --source
+PET_BIN="$PET_SOURCE/dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet"
+"$PET_BIN" --version
+"$PET_BIN" update-capabilities
+```
+
+기존 네이티브 체크아웃이라면 clone 명령만 건너뛰세요. 소스 설치기는 앱을 해당 체크아웃의 `dist/HerdrDesktopPet.app`에 패키징하며 플러그인 체크아웃에 복사하지 않습니다. 이후 위의 동일하게 분리된 `PET_CONFIG`/`PET_STATE`, 명시적인 `--host tern` settings/start/status 명령과 공개 플러그인 설치를 사용하되 `PET_BIN`은 이 소스 빌드 경로로 바꾸세요.
+
+### 로컬 플러그인 체크아웃 대안
 
 공개 `tern plugin install` 명령 대신 로컬 플러그인 소스 체크아웃을 연결할 수도 있습니다:
 
@@ -57,7 +81,7 @@ tern plugin list
 
 실제 Tern 창의 명령 팔레트에서 **Configure desktop pet connection** (`configure`)을 선택하세요. 다음 세 질문에 순서대로 답합니다.
 
-1. **Desktop pet executable (path or command):** 위 `PET_BIN`에 담긴 전체 절대 경로를 입력합니다. 예: `/absolute/path/to/herdr-desktop-pet-source/dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet` (변수명이나 `.app` 디렉터리가 아닙니다).
+1. **Desktop pet executable (path or command):** 위 셸에서 `printf '%s\n' "$PET_BIN"`으로 출력한 전체 절대 경로를 입력합니다(변수명이나 `.app` 디렉터리가 아닙니다). 소스 개발용 대안의 경우 `/absolute/path/to/herdr-desktop-pet-source/dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet`입니다.
 2. **Absolute desktop pet config directory:** `PET_CONFIG`와 동일한, 확장된 절대 경로를 입력합니다.
 3. **Absolute desktop pet state directory:** `PET_STATE`와 동일한, 확장된 절대 경로를 입력합니다.
 

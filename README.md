@@ -6,34 +6,58 @@
 
 ## Requirements and installation
 
-Use an Apple Silicon Mac running macOS 13+ with a local checkout of the [Herdr Desktop Pet app source](https://github.com/hanbong5938/herdr-desktop-pet). **Until the native integration is merged, explicitly fetch and check out `origin/tern-desktop-pet-integration`, not the default branch**, using the commands below. The app source build needs Rust/Cargo, Bun, Node.js/npm, Xcode Command Line Tools and `codesign`; it can download build dependencies. The source installer builds and packages the app into its source checkout's `dist/HerdrDesktopPet.app`. **Existing public binaries have not been upgraded by publishing this plugin or the native integration branch; build the native app separately from that branch. Do not substitute an older published/prebuilt app:** this integration needs a native CLI with `tern-exchange`, `--host tern`, and `update-capabilities` reporting `protocol: 3` and `observation_mode: 1`. An old app reporting an unknown `tern-exchange` command cannot work with this plugin. Building the app does not copy it into the plugin checkout.
+Use an Apple Silicon Mac running macOS 13+ with the separately installed [Herdr Desktop Pet native app](https://github.com/hanbong5938/herdr-desktop-pet) **0.3.6 or newer**. The primary path is the Homebrew prebuilt native app, then the public Tern plugin: two explicit installs. The plugin never silently downloads, executes an installer for, or builds the app. This binary path needs neither a native source checkout nor Rust/Cargo, Bun, or Node.js/npm. The native CLI must support `tern-exchange`, `--host tern`, and `update-capabilities` reporting **both** `protocol: 3` and `observation_mode: 1`; an older app with an unknown `tern-exchange` command cannot work.
+
+[v0.3.6](https://github.com/hanbong5938/herdr-desktop-pet/releases/tag/v0.3.6) is the published latest stable release, with verified public arm64 assets/checksums and the updated stable Homebrew formula. The matched app/helper pair reports `protocol: 3` and `observation_mode: 1`. Historical v0.3.5 and beta assets remain unchanged. The public plugin install is separate from native installation; existing binaries must still be explicitly upgraded.
+
+**Published consumer-route evidence:** the actual stable Brew upgrade from 0.3.5 to 0.3.6 succeeded, and the public pinned `--prebuilt` installer completed with only system tools on `PATH` (no Cargo, Bun, Node.js or npm). Both installed apps started in separate private Tern config/state profiles with `app_version: 0.3.6`, `observation_mode: tern` and `ui_ready: true` despite an absent configured Herdr socket parent; a valid empty exchange-v1 snapshot was accepted with `command: null`, followed by clean ordinary Stop. The real public plugin URL installed version 0.1.0 into an isolated Tern configuration and its catalog was ready without problems. This proves these consumer routes, not a connected GUI plugin window, populated sessions/model delivery, a full updater transaction or general certification. Existing user profiles were untouched.
 
 Tern is currently a closed beta requiring a signed-in account. Install/open a compatible Tern build through your own authorized beta access and sign in normally; do not bypass authentication. A manifest link or empty signed-out window alone is not functional verification. No specific minimum Tern version or public distribution is promised here.
 
 **Earlier local live-agent verification:** in an existing signed-in Tern 0.6.1 window, a local agent pane was observed through the window plugin and native pet using an isolated verification profile. A semantic ask to an agent in a disposable tab returned native `prompt_accepted` with delivery `accepted_may_be_queued`; Tern's actual agent transcript subsequently showed the requested `TERN_PET_SMOKE_OK` assistant reply, and its state became idle with a matching last message. The transcript independently confirms this particular reply was delivered; neither the accepted receipt nor idle state alone is an authoritative completion event. This historic observation is separate from the current repair regression evidence below. It was local verification of unpublished source, not a published release or a minimum-version guarantee.
 
-In a shell, set `PET_SOURCE` to your **actual absolute native checkout path** (an unused directory for a new clone). Keep the same native config/state paths in every native command and in the Tern plugin configuration. For a new native checkout, run `git clone` below; for an existing checkout, skip only that clone command and still fetch and check out the exact integration branch before building:
+Install the native app first, then the plugin. If the formula is already installed, replace the first command with `brew update && brew upgrade hanbong5938/tap/herdr-desktop-pet`. Keep the same isolated native config/state paths in every native command and in the Tern command-palette configuration: Existing native profiles/preferences are preserved.
 
 ```sh
-PET_SOURCE=/absolute/path/to/herdr-desktop-pet-source
+brew install hanbong5938/tap/herdr-desktop-pet
+tern plugin install https://github.com/hanbong5938/tern-desktop-pet
+
+PET_BIN="$(command -v herdr-desktop-pet)"
 PET_CONFIG="$HOME/.config/tern-desktop-pet/native"
 PET_STATE="$HOME/.local/state/tern-desktop-pet/native"
 
-git clone https://github.com/hanbong5938/herdr-desktop-pet.git "$PET_SOURCE"
-cd "$PET_SOURCE"
-git fetch origin tern-desktop-pet-integration
-git checkout --detach origin/tern-desktop-pet-integration
-bash scripts/install.sh --source
-PET_BIN="$PET_SOURCE/dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet"
+"$PET_BIN" --version
 "$PET_BIN" update-capabilities
+# Continue only after confirming 0.3.6+, protocol: 3 and observation_mode: 1.
 "$PET_BIN" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" settings set exit_with_herdr off
 "$PET_BIN" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" start
 "$PET_BIN" --host tern --config-dir "$PET_CONFIG" --state-dir "$PET_STATE" status
 
-tern plugin install https://github.com/hanbong5938/tern-desktop-pet
 tern plugin reload
 tern plugin list
 ```
+
+Confirm version **0.3.6+** and both capability fields **before** starting the app; the commands above are not a substitute for those checks. The shared native app defaults to Herdr mode, so retain explicit `--host tern`. Next open a signed-in Tern window and use **Configure desktop pet connection** (`configure`) in its command palette to save `PET_BIN` and the two expanded isolated paths as described below; shell variables do not configure the plugin.
+
+### Source-development alternative
+
+Optional native source development requires Rust/Cargo, Bun, Node.js/npm, Xcode Command Line Tools and `codesign`; builds can download dependencies. Set `PET_SOURCE` to an actual absolute checkout path, using an unused directory for a new clone. Build the published v0.3.6 tag below; no integration branch is required:
+
+```sh
+PET_SOURCE=/absolute/path/to/herdr-desktop-pet-source
+git clone https://github.com/hanbong5938/herdr-desktop-pet.git "$PET_SOURCE"
+cd "$PET_SOURCE"
+git fetch origin tag v0.3.6
+git checkout --detach v0.3.6
+bash scripts/install.sh --source
+PET_BIN="$PET_SOURCE/dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet"
+"$PET_BIN" --version
+"$PET_BIN" update-capabilities
+```
+
+For an existing native checkout, skip only the clone command. The source installer packages the app into that checkout's `dist/HerdrDesktopPet.app`; it does not copy it into the plugin checkout. Then use the same isolated `PET_CONFIG`/`PET_STATE`, explicit `--host tern` settings/start/status commands and public plugin installation above, substituting this source-built `PET_BIN`.
+
+### Local plugin checkout alternative
 
 Alternatively, use a local plugin source checkout instead of the public `tern plugin install` command:
 
@@ -57,7 +81,7 @@ Run these after substituting real paths; the `PET_*` shell variables are only co
 
 In the actual Tern window, choose **Configure desktop pet connection** (`configure`) from the command palette. Its three prompts, in order, are:
 
-1. **Desktop pet executable (path or command):** enter the full absolute path stored above in `PET_BIN`, e.g. `/absolute/path/to/herdr-desktop-pet-source/dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet` (not the variable name or app bundle directory).
+1. **Desktop pet executable (path or command):** enter the full absolute path printed by `printf '%s\n' "$PET_BIN"` in the shell above (not the variable name or app bundle directory). For the source-development alternative, this is `/absolute/path/to/herdr-desktop-pet-source/dist/HerdrDesktopPet.app/Contents/MacOS/herdr-desktop-pet`.
 2. **Absolute desktop pet config directory:** the same expanded absolute path as `PET_CONFIG`.
 3. **Absolute desktop pet state directory:** the same expanded absolute path as `PET_STATE`.
 
