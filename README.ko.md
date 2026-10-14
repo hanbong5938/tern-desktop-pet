@@ -8,11 +8,11 @@
 
 [앱 홈페이지](https://hanbong5938.github.io/desktop-pet/) · [Core 설치·프로필](https://github.com/hanbong5938/desktop-pet/blob/main/docs/development.ko.md) · [현재 앱 사용법](https://github.com/hanbong5938/desktop-pet/blob/main/docs/usage.ko.md) · [Core Wiki](https://github.com/hanbong5938/desktop-pet/wiki) · [기존 설치 이전](https://github.com/hanbong5938/desktop-pet/blob/main/docs/migrations/desktop-pet.md). 링크는 core 소유의 목적지이며 실제 공개 배포·재연결 증거가 아닙니다.
 
-**공개/검증 상태:** 아래는 소비자 소스 안내이며 플러그인 0.2.0, 중립 앱 0.4.0, 새 Brew 포뮬러의 공개 또는 이전 후 실제 Tern 창 재연결 증거가 아닙니다. 현재 프로덕션 소스 하네스는 통제된 SDK 경계로 **실제 Tern 0.8.3 창 VM에서 132/132 통과**했습니다. 실제 원격 SDK 에이전트·일치하는 중립 앱 설치·모델 전달 검증은 아닙니다. 아래 0.1.0/Herdr 네이티브 관측은 과거 증거로만 보존합니다.
+**공개/검증 상태:** 독립 [Desktop Pet v0.4.1](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.1)과 중립 Brew 포뮬러는 공개되었고 실제 공개 자산·서명·4/2/1 capability, 68개 파일 closure와 disposable Mac의 Brew 업그레이드·네이티브 준비를 검증했습니다. 플러그인 0.2.0의 게시와 실제 Tern 창 재연결·모델 전달은 별개입니다. 프로덕션 소스 하네스는 이전에 통제된 SDK 경계로 **실제 Tern 0.8.3 창 VM에서 132/132 통과**했으며 공개 contracts를 사용한 adapter 회귀 검사 **38개**가 통과했습니다. 실제 원격 SDK 에이전트나 모델 전달 검증은 아닙니다. 새 비공개 지원 창 검증은 Tern의 정상 keychain 로그인 문제로 막혀 있으며 인증을 우회하지 않았습니다. 아래 0.1.0/Herdr 네이티브 관측은 과거 증거로만 보존합니다.
 
 ### 네이티브 앱은 별도로 설치·시작
 
-실제로 사용할 수 있고 검증한 core 앱 릴리스 또는 소스 빌드를 사용하세요. 실제 게시 후 앱은 별도로 `brew install hanbong5938/tap/desktop-pet`으로 설치하며 구형 포뮬러는 새 제품의 별칭이 아닙니다. 네이티브를 직접 시작한 후 실제 실행 파일과 두 프로필 경로를 **Configure desktop pet connection → Connect to desktop pet**에서 선택하세요. 로컬 core 개발 예시:
+공개 앱은 별도로 `brew install hanbong5938/tap/desktop-pet`으로 설치하거나 명시적으로 검증한 core 소스 빌드를 사용하세요. 구형 포뮬러는 새 제품의 별칭이 아닙니다. 네이티브를 직접 시작한 후 실제 실행 파일과 두 프로필 경로를 **Configure desktop pet connection → Connect to desktop pet**에서 선택하세요. 이 플러그인 설치로 네이티브 앱을 설치하거나 시작하지 않습니다. 로컬 core 개발 예시:
 
 ```sh
 CORE=/absolute/path/to/desktop-pet
