@@ -98,8 +98,10 @@ end
 local SETUP_TIMEOUT_MS = 10000
 local SETUP_RESPONSE_BYTES = 32 * 1024
 local setup_serial = 0
+local setup_pending = nil
+local automatic_reconnect = false
 local active_storage = nil
-local INSTALL_ADVICE = "Install Desktop Pet separately from https://github.com/hanbong5938/desktop-pet, then use Configure with an absolute executable and both profile paths. The plugin never installs or starts the app."
+local INSTALL_ADVICE = "Approved saved legacy-route migration reconnects automatically when native is ready. Configure is for new/manual setup or repair with an absolute executable and both profile paths. Install Desktop Pet separately from https://github.com/hanbong5938/desktop-pet; the plugin never installs or starts the app."
 
 local function absolute_path(value)
 	return type(value) == "string" and value:sub(1, 1) == "/" and #value <= MAX_FIELD_BYTES
@@ -265,7 +267,7 @@ exec "$helper" discover --json
 local function setup_process(argv, options, cx, current, ready)
 	local started, message = pcall(function()
 		tern.process.run(argv, options):next(function(result, err, fresh_cx)
-			if fresh_cx == nil or not current(fresh_cx) then return end
+			if not current(fresh_cx) then return end
 			local ok, failure = pcall(function()
 				if err ~= nil then error(tostring(err)) end
 				if type(result) ~= "table" or result.timed_out then error("native discovery/profile query timed out") end
@@ -273,14 +275,21 @@ local function setup_process(argv, options, cx, current, ready)
 				if type(result.stdout) ~= "string" or #result.stdout > SETUP_RESPONSE_BYTES then error("invalid or oversized native discovery/profile response") end
 				ready(result.stdout, fresh_cx)
 			end)
-			if not ok then show_error(fresh_cx, tostring(failure) .. "\n" .. INSTALL_ADVICE) end
+			if not ok then
+				setup_pending = nil
+				show_error(fresh_cx, tostring(failure) .. "\n" .. INSTALL_ADVICE)
+			end
 		end)
 	end)
-	if not started then show_error(cx, tostring(message) .. "\n" .. INSTALL_ADVICE) end
+	if not started then
+		setup_pending = nil
+		show_error(cx, tostring(message) .. "\n" .. INSTALL_ADVICE)
+	end
 end
 
 local function resolve_connection(explicit, paths, cx, current, ready)
 	if explicit ~= nil and not absolute_path(explicit) then
+		setup_pending = nil
 		show_error(cx, "Executable must be absolute. " .. INSTALL_ADVICE)
 		return
 	end
@@ -336,6 +345,33 @@ local function resolve_connection(explicit, paths, cx, current, ready)
 					ready(connection, profile_cx)
 				end)
 			end)
+		end)
+	end)
+end
+
+local function resolve_migration(connection, cx, current, ready)
+	-- Discovery locates the signed query transport, never grants route authority.
+	-- Only native's authenticated committed approval may replace a legacy route.
+	resolve_connection(nil, connection, cx, current, function(validated, proof_cx)
+		setup_process({ validated.executable, "legacy-migration-route", "--config-dir", connection.config_dir,
+			"--state-dir", connection.state_dir }, {
+			timeout_ms = SETUP_TIMEOUT_MS,
+			stdin = tern.json.encode({ version = 1, kind = "legacy-migration-route",
+				executable = connection.executable, config_dir = connection.config_dir, state_dir = connection.state_dir }),
+			env = { DESKTOP_PET_CONFIG_DIR = connection.config_dir, DESKTOP_PET_STATE_DIR = connection.state_dir },
+		}, proof_cx, current, function(stdout, route_cx)
+			local proof = tern.json.decode(stdout)
+			if type(proof) ~= "table" or proof.version ~= 1 or proof.kind ~= "legacy-migration-route"
+				or proof.committed ~= true then error("native migration route is not committed and approved") end
+			for key in pairs(proof) do
+				if key ~= "version" and key ~= "kind" and key ~= "committed" and key ~= "original" and key ~= "target" then
+					error("unknown native migration route proof field")
+				end
+			end
+			local original, target = validate_connection(proof.original), validate_connection(proof.target)
+			if not same_connection(original, connection) then error("native migration proof does not match the exact saved original route") end
+			if not same_connection(target, validated) then error("native migration proof does not match the verified target and original profile pair") end
+			ready(target, route_cx)
 		end)
 	end)
 end
@@ -565,17 +601,19 @@ local function reset_identity()
 	busy = false
 	active_exchange = nil
 	last_error = nil
+	setup_pending = nil
 end
 
 local function refresh_connection()
 	local storage = stored_identity()
 	if active_storage ~= nil and storage ~= active_storage then
-		-- Retire before accepting a route from another window. Validation is an
-		-- explicit Connect step, never discovery from the repeating timer.
+		-- Retire old work before validating another window's atomic route save.
+		-- The next tick validates that exact executable, never a substitute.
 		reset_identity()
 		active_connection = nil
 		active_storage = nil
 		setup_serial += 1
+		automatic_reconnect = true
 	end
 	if active_connection == nil then error("Use Connect or Configure to validate the native connection. " .. INSTALL_ADVICE) end
 	return active_connection
@@ -941,20 +979,41 @@ end
 
 local function setup_guard(cx)
 	setup_serial += 1
+	setup_pending = nil
 	local serial, source = setup_serial, incarnation
 	local captured, storage = pcall(stored_identity)
 	if not captured then show_error(cx, tostring(storage)); return nil end
+	setup_pending = serial
 	return function(fresh_cx)
-		if fresh_cx == nil or serial ~= setup_serial or source ~= incarnation then return false end
+		if serial ~= setup_serial or source ~= incarnation then return false end
+		if fresh_cx == nil then setup_pending = nil; return false end
 		local checked, now = pcall(stored_identity)
-		if not checked then show_error(fresh_cx, tostring(now)); return false end
+		if not checked then setup_pending = nil; show_error(fresh_cx, tostring(now)); return false end
 		if now ~= storage then
 			-- Another window won. Fence prompts, discovery and offered commands.
 			pcall(refresh_connection)
+			setup_pending = nil
+			automatic_reconnect = true
 			return false
 		end
 		return true
 	end, storage
+end
+
+local function save_connection(candidate, validated, cx, current)
+	if not current(cx) then return end
+	local saved, message = pcall(tern.kv.set, "connection", candidate)
+	setup_pending = nil
+	if not saved then show_error(cx, "could not save desktop pet connection: " .. tostring(message)); return end
+	-- One atomic save is the cutover. Retire all old work and uncertain reports.
+	reset_identity()
+	setup_serial += 1
+	active_connection = validated
+	cleanup_legacy()
+	active_storage = tern.json.encode({ connection = candidate })
+	automatic_reconnect = false
+	exchange(cx)
+	return true
 end
 
 local function connect(cx)
@@ -963,15 +1022,19 @@ local function connect(cx)
 	local current, storage = setup_guard(cx)
 	if current == nil then return end
 	local loaded, connection = pcall(settings)
-	if not loaded then show_error(cx, tostring(connection) .. "\n" .. INSTALL_ADVICE); return end
+	if not loaded then setup_pending = nil; show_error(cx, tostring(connection) .. "\n" .. INSTALL_ADVICE); return end
 	if connection ~= nil and legacy_executable(connection.executable) then
-		show_error(cx, "Saved Herdr executable needs explicit migration: use Configure to propose Desktop Pet with both existing profile paths. Nothing was saved.")
+		resolve_migration(connection, cx, current, function(target, fresh_cx)
+			save_connection(target, target, fresh_cx, current)
+		end)
 		return
 	end
-	if active_connection ~= nil and active_storage == storage then exchange(cx); return end
+	if active_connection ~= nil and active_storage == storage then setup_pending = nil; exchange(cx); return end
 	resolve_connection(connection and connection.executable or nil, connection, cx, current, function(validated, fresh_cx)
+		setup_pending = nil
 		reset_identity()
 		active_connection, active_storage = validated, storage
+		automatic_reconnect = false
 		exchange(fresh_cx)
 	end)
 end
@@ -989,10 +1052,10 @@ local function configure(cx)
 		local function continuation(callback)
 			return function(value, err, fresh_cx)
 				if not current(fresh_cx) then return end
-				if err ~= nil then show_error(fresh_cx, tostring(err)); return end
-				if value == nil then return end
+				if err ~= nil then setup_pending = nil; show_error(fresh_cx, tostring(err)); return end
+				if value == nil then setup_pending = nil; return end
 				local ok, message = pcall(callback, value, fresh_cx)
-				if not ok then show_error(fresh_cx, tostring(message) .. "\n" .. INSTALL_ADVICE) end
+				if not ok then setup_pending = nil; show_error(fresh_cx, tostring(message) .. "\n" .. INSTALL_ADVICE) end
 			end
 		end
 		proposal_cx:prompt({ value = proposal.executable, placeholder = "Absolute Desktop Pet executable" }):next(continuation(function(new_executable, executable_cx)
@@ -1000,18 +1063,9 @@ local function configure(cx)
 				config_cx:prompt({ value = proposal.state_dir, placeholder = "Absolute desktop pet state directory" }):next(continuation(function(new_state, state_cx)
 					local candidate = validate_connection({ version = 1, executable = new_executable, config_dir = new_config, state_dir = new_state })
 					resolve_connection(candidate.executable, candidate, state_cx, current, function(validated, save_cx)
-						if not current(save_cx) then return end
-						local saved, message = pcall(tern.kv.set, "connection", candidate)
-						if not saved then show_error(save_cx, "could not save desktop pet connection: " .. tostring(message)); return end
-						-- The one successful atomic save is the cutover. Retire old
-						-- generation before replacing active routing; never replay.
-						reset_identity()
-						setup_serial += 1
-						active_connection = validated
-						cleanup_legacy()
-						active_storage = tern.json.encode({ connection = candidate })
-						save_cx:toast("info", "Desktop pet connection saved")
-						exchange(save_cx)
+						if save_connection(candidate, validated, save_cx, current) then
+							save_cx:toast("info", "Desktop pet connection saved")
+						end
 					end)
 				end))
 			end))
@@ -1028,11 +1082,24 @@ end
 
 local function tick(cx)
 	timer = tern.timer(INTERVAL_MS, tick)
-	if active_connection ~= nil then exchange(cx) end
+	if active_connection ~= nil then
+		local loaded, message = pcall(refresh_connection)
+		if loaded then exchange(cx); return end
+		if active_connection ~= nil then show_error(cx, tostring(message)); return end
+	end
+	if setup_pending ~= nil then return end
+	if automatic_reconnect then
+		automatic_reconnect = false
+		connect(cx)
+		return
+	end
+	local loaded, connection = pcall(settings)
+	if not loaded then show_error(cx, tostring(connection)); return end
+	if connection ~= nil and legacy_executable(connection.executable) then connect(cx) end
 end
 
--- Discovery runs once on load/window start, or explicitly through commands.
--- Repeating observation only uses the already validated absolute triple.
+-- Repeating discovery is limited to legacy routes awaiting committed native
+-- approval. Saved-route changes validate the exact replacement before polling.
 tern.on("window_start", connect)
 for _, event in ipairs({ "pane_created", "pane_closed", "tab_created", "tab_closed",
 	"command_started", "command_finished", "cwd", "title" }) do

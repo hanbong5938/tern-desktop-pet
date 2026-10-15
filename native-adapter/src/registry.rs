@@ -101,6 +101,9 @@ impl TernRegistry {
     pub(crate) fn get(&self, window: &str) -> Option<&Window> {
         self.windows.get(window)
     }
+    pub(crate) fn windows(&self) -> impl Iterator<Item = (&str, &Window)> {
+        self.windows.iter().map(|(id, window)| (id.as_str(), window))
+    }
     pub(crate) fn get_mut(&mut self, window: &str) -> Option<&mut Window> {
         self.windows.get_mut(window)
     }

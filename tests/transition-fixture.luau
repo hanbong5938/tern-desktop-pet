@@ -199,6 +199,18 @@ return function(shared)
 						elseif argv[2] == "update-capabilities" then
 							stage = "capability"
 							value = real.json.encode({ integration_api = f.integration_api or 1, protocol = 4, observation_mode = 2, app_version = "0.4.0" })
+						elseif argv[2] == "legacy-migration-route" then
+							stage = "migration"
+							local original = real.json.decode(options.stdin)
+							expect(original.version == 1 and original.kind == "legacy-migration-route", "migration query omitted its protocol identity")
+							expect(argv[4] == original.config_dir and argv[6] == original.state_dir
+								and options.env.DESKTOP_PET_CONFIG_DIR == original.config_dir
+								and options.env.DESKTOP_PET_STATE_DIR == original.state_dir, "migration proof changed the original profile pair")
+							value = real.json.encode(f.migration_proof or {
+								version = 1, kind = "legacy-migration-route", committed = true,
+								original = { version = 1, executable = original.executable, config_dir = original.config_dir, state_dir = original.state_dir },
+								target = { version = 1, executable = argv[1], config_dir = original.config_dir, state_dir = original.state_dir },
+							})
 						else
 							expect(argv[2] == "profile" and argv[3] == "show" and argv[4] == "--json", "unsupported setup command")
 							stage = "profile"
@@ -209,10 +221,11 @@ return function(shared)
 						end
 						if f.setup_json_error == stage then value = "not JSON" end
 						if stage == "proof" and f.no_installation then value = "null" end
-						pending.callback({ status = f.setup_failure == stage and 1 or 0,
-							timed_out = f.setup_timeout == stage, stdout = value, stderr = "injected proof failure" }, nil, cx)
+						pending.callback({ status = (f.setup_failure == stage or (stage == "migration" and not f.migration_available)) and 1 or 0,
+							timed_out = f.setup_timeout == stage, stdout = value,
+							stderr = stage == "migration" and "no committed approved route or Tern provider unavailable" or "injected proof failure" }, nil, cx)
 					end
-					if f.hold_setup then
+					if f.hold_setup or (argv[2] == "legacy-migration-route" and f.hold_migration) then
 						table.insert(f.setup_pending, complete)
 					else
 						table.insert(f.stages, { callback = complete, delay_ms = 0, microtask = true })

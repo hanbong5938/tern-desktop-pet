@@ -41,17 +41,21 @@ tern plugin list
 
 공개 후 별도 플러그인 설치 명령은 `tern plugin install https://github.com/hanbong5938/tern-desktop-pet`입니다. 정당한 Tern 베타 접근과 로그인된 실제 창이 필요하며 헤드리스 카탈로그만으로 실행이나 재연결을 검증할 수 없습니다.
 
+**이미 설치된 플러그인 배포:** 앱만 업데이트하거나 후속 소스를 공개해도 설치된 플러그인 0.2.0의 창 VM은 바뀌지 않습니다. 승인된 네이티브 이전은 Tern의 지원되는 [`tern plugin install <package-dir> --force --json`](https://docs.stencil.so/tern/reference/cli.md#tern-plugin-install) 계약으로 신뢰된 후속 플러그인도 전달해야 합니다. Tern은 설치 복사본을 원자적으로 교체하고 별도 KV를 보존하며 [창 VM을 자동 재로드](https://docs.stencil.so/tern/concepts/lifecycle.md#reloading)합니다. `window_start`가 반복되지 않아도 이 플러그인의 시작 timer가 재연결합니다. `--force`는 연결된 개발 패키지를 덮어쓰지 않습니다. 설치 exit 0이나 헤드리스 Ready 카탈로그는 실제 재연결 증거가 아닙니다. 재로드 실패를 숨기지 않고 실제 신선한 어댑터 binding이 있어야 완료입니다. 신뢰된 후속 플러그인 전달이 없으면 단일 승인 이전은 미완료이며, 추가 수동 Configure/업데이트 확인을 요구하는 것으로 대신할 수 없습니다.
+
 ### Connect·Configure·기존 연결 이전
 
 **Connect to desktop pet**은 저장된 절대 실행 파일을 검증하거나 다음 순서로 중립 앱을 찾습니다: 명시적 절대 실행 파일 → OS 계정 home의 검증된 비공개 `.local/share/desktop-pet/installation.json` → `PATH`의 `desktop-pet` → 실제 `brew --prefix desktop-pet` → OS 계정 home의 `Applications/DesktopPet.app`. 잘못된 명시적 경로/locator는 다른 설치로 우회하지 않고 실패합니다. bootstrap은 중립 bundle identity와 앱/도우미 서명을 확인한 뒤 일치하는 도우미의 읽기 전용 `discover --json`을 실행하고, 도우미가 실제 설치 origin/capability를 검증합니다. 앱 탐색을 위해 셸 wrapper를 실행하지 않습니다. 호환성은 플러그인/앱 버전 일치가 아닌 **`integration_api:1`**입니다.
 
-탐색·capability·`profile show --json`은 제한된 [문서화된 awaitable 하위 프로세스](https://docs.stencil.so/tern/reference/api-shared.md#ternprocessrun) 단계로 실행합니다. 콜백에서 동기 대기하지 않고 1.2초 폴링 때마다 탐색하지 않으며 성공적으로 검증한 절대 경로 세 값만 폴링에 사용합니다. 새 기본 경로는 검증된 앱의 profile 응답에서만 얻고 **Herdr 경로를 조합하지 않습니다**. 앱 없음·JSON 오류·시간 초과·호환 API 없음·권한/서명 오류는 설치/설정 안내를 표시하고 저장하지 않습니다. 다른 창이 연결을 변경하면 이전 작업을 폐기하며 명시적 Connect로 새 연결을 검증해야 교환이 재개됩니다.
+탐색·capability·`profile show --json`은 제한된 [문서화된 awaitable 하위 프로세스](https://docs.stencil.so/tern/reference/api-shared.md#ternprocessrun) 단계로 실행합니다. 일반 폴링은 재탐색이나 콜백의 동기 대기 없이 검증한 절대 경로 세 값만 사용합니다. 새 기본 경로는 검증된 앱의 profile 응답에서만 얻고 **Herdr 경로를 조합하지 않습니다**. 앱 없음·JSON 오류·시간 초과·호환 API 없음·권한/서명 오류는 실제 오류를 표시하고 저장하지 않습니다. 다른 창이 연결을 원자적으로 저장하면 이전 작업을 폐기하고 다음 주기 tick에서 정확히 그 실행 파일과 두 경로를 검증한 후 자동 재연결합니다. custom 실행 파일을 탐색 결과로 대체하지 않습니다.
 
-**Configure desktop pet connection**은 절대 실행 파일, 절대 config 디렉터리, 절대 state 디렉터리를 순서대로 묻습니다. 설치된 앱과 전체 후보 프로필을 검증한 뒤 한 번의 원자적 KV 쓰기로 `{ version = 1, executable = "...", config_dir = "...", state_dir = "..." }` 객체를 저장합니다. Connect는 객체를 다시 쓰지 않습니다. 취소·검증/저장 실패·오래된 콜백은 이전 객체를 보존합니다. 완전한 구형 세 키는 자동 저장 없이 읽을 수 있으며, 명시적 Configure 저장 성공 후에만 정식 객체를 먼저 저장하고 구형 키 정리를 시도합니다. 불완전한 구형 설정은 전체를 명시적으로 복구해야 하고 잘못된 정식 객체가 있어도 구형 키를 되살리지 않습니다.
+**Configure desktop pet connection**은 의도적인 경로 변경·복구에 계속 사용할 수 있습니다. 절대 실행 파일, 절대 config 디렉터리, 절대 state 디렉터리를 순서대로 묻고 설치된 앱과 전체 후보 프로필을 검증한 뒤 한 번의 원자적 KV 쓰기로 `{ version = 1, executable = "...", config_dir = "...", state_dir = "..." }` 객체를 저장합니다. 아래의 승인된 레거시 이전을 제외하면 Connect는 객체를 다시 쓰지 않습니다. 취소·검증/저장 실패·오래된 콜백은 이전 객체를 보존합니다. 완전한 구형 세 키는 자동 저장 없이 읽을 수 있고 Configure 또는 승인된 이전 성공 시 정식 객체를 먼저 저장한 후 구형 키 정리를 시도합니다. 불완전한 구형 설정은 명시적 복구가 필요하며 잘못된 정식 객체가 있어도 구형 키를 되살리지 않습니다.
 
-저장된 실행 파일이 `herdr-desktop-pet`이면 Connect는 Configure를 통한 명시적 이전을 안내합니다. Configure는 발견된 중립 실행 파일과 **기존 두 프로필 경로**를 제안하며 사용자의 저장 성공 전에는 변경하지 않습니다. 임의 custom 실행 파일은 탐색 결과로 대체하지 않습니다. Configure는 플러그인 경로만 바꾸며 프로필 이동·병합·삭제, 네이티브 설치/시작, 네이티브 기본 프로필 채택을 수행하지 않습니다. 기본 프로필 변경은 core의 [명시적 adoption 안내](https://github.com/hanbong5938/desktop-pet/blob/main/docs/development.md#profiles-and-installation-discovery)를 따르세요.
+저장된 실행 파일이 `herdr-desktop-pet`이면 최초 네이티브 업데이트 승인만으로 충분합니다. Connect와 주기 tick은 서명된 중립 앱을 질의 전송 대상으로 찾은 뒤 **저장된 구형 실행 파일과 원래 config/state 경로 두 개 전체**에 대한 읽기 전용 `legacy-migration-route` 증거를 요청합니다. 단순 탐색은 이전 권한이 아닙니다. 네이티브는 승인된 이전의 commit, 실제 대상 실행 파일·실행 중 프로필, 원본 source 종료를 인증해야 합니다. 증거의 원본이 저장된 세 값과 정확히 일치하고 대상이 검증된 실행 파일 및 변경 없는 두 경로와 일치할 때만 한 번의 원자적 저장 후 binding/result를 비운 새 소스로 자동 재연결합니다. Configure나 재연결 확인 질문은 추가하지 않습니다. 승인·대상·Tern provider가 없으면 실제 실패를 표시하며, 이후 commit은 다음 tick에서 겹치는 setup 질의 없이 감지할 수 있습니다. custom 실행 파일은 임의로 대체하지 않습니다. 플러그인은 네이티브 설치/시작이나 프로필·이전 journal·캐릭터 자산·기록의 이동·병합·삭제·재작성을 하지 않습니다. Configure는 명시적 대안이지 추가 승인 절차가 아닙니다.
 
-네이티브 `status`에서 실제 실행 중 이미지와 선택한 두 경로를 확인하세요. 다른/구형 데몬이 해당 프로필을 소유하면 그 실행 파일과 같은 경로로 직접 중지한 뒤 의도한 앱을 시작해야 합니다. 플러그인은 몰래 데몬을 교체하지 않습니다. `DESKTOP_PET_CONFIG_DIR` / `DESKTOP_PET_STATE_DIR` 환경 변수와 명시적 native 인자는 항상 같은 두 경로를 선택합니다.
+인증된 로컬 control 질의 `{"version":1,"kind":"tern-migration-evidence"}`에는 사용자가 만든 증거 파일이나 창 식별자가 필요하지 않습니다. 어댑터는 실제로 신선하며 현재 데몬 확인이 끝난 로컬 binding을 골라 실제 `instance_id`, `window_id`, `binding_epoch`, `sequence`, `local_host`, `observation_generation`, `native_generation`, `fresh:true`를 반환합니다. 선택적 `window_id`를 지정하면 해당 창만 허용하고 다른 창으로 우회하지 않습니다. 미확인·오래됨·Offline·원격·읽기 전용·generation 불일치·폐기 source는 증거가 될 수 없으며 적합한 binding이 없으면 성공을 꾸미지 않고 오류를 반환합니다.
+
+새 설치나 수동 연결은 네이티브 `status`에서 실제 실행 이미지와 선택한 두 경로를 확인하세요. 승인된 네이티브 이전이 아닌 경우 다른/구형 데몬이 프로필을 소유하면 그 실행 파일과 같은 경로로 직접 중지한 뒤 의도한 앱을 시작해야 합니다. 플러그인은 몰래 데몬을 교체하지 않습니다. `DESKTOP_PET_CONFIG_DIR` / `DESKTOP_PET_STATE_DIR` 환경 변수와 명시적 native 인자는 항상 같은 두 경로를 선택합니다.
 
 소스·인스턴스·generation·공유 KV·단계·pane/host 경계를 유지합니다. 연결 전환은 활성 경로 변경 전에 이전 작업을 폐기합니다. 이미 제공했거나 불확실한 ask는 **UnknownDelivery**이며 새 binding에서 재전송하지 않습니다. `agents:ask` 성공은 수락/대기열 접수 가능성을 뜻하며 모델 작업 완료가 아닙니다. 현재 소스의 exchange는 **버전 2**로 독립된 host별 스냅샷과 관찰/네이티브 generation을 사용하며 저장된 연결 객체는 **버전 1**입니다. 원격 host는 읽기 전용 관찰이며 의미 기반 `agents:get`/`agents:ask`는 로컬만 허용합니다. 요청 256 KiB/응답 512 KiB의 독립 한도는 유지합니다.
 
@@ -111,7 +115,7 @@ return tern.json.encode(desktop_pet_suite.get_results())
 
 다른 호출/프로세스에서 기록된 JSON을 읽어도 됩니다. `scheduled = true`는 시작 접수일 뿐이며 사례 등록도 비동기입니다. **`done == true`, `fatal_error` 없음, `passed == total`**을 모두 요구하세요. 고정 sleep이나 중간 개수를 완료 조건으로 삼지 말고 `cases`의 실패를 확인하세요. 체크포인트는 다음 작업 콜백 전에 완료 사례와 `active_case`/`stage`/`step`을 기록하므로 강제 콜백 예산 중단 시에도 마지막 위치를 남깁니다.
 
-**현재 관측 결과: Tern 0.8.3에서 132/132, `done=true`**. 실제 프로덕션 소스를 통제된 목록/KV/질문/하위 프로세스/ask 경계로 실행했습니다. 설치/setup·이전 경계, 호스트별 목록, 독립 generation/Offline/오류, 로컬 전용 전달을 포함합니다. 실제 KV 변경·하위 프로세스·질문·에이전트 ask는 하네스 밖으로 나가지 않습니다. 실제 원격 SDK 에이전트나 서명된 중립 앱 재연결 증거가 아니며 과거 44/44 결과를 현재 결과로 인용하지 않습니다.
+**이전 관측 결과: Tern 0.8.3에서 132/132, `done=true`**. 실제 프로덕션 소스를 통제된 목록/KV/질문/하위 프로세스/ask 경계로 실행한 과거 결과이며, 현재 자동 committed-route 이전·선택적 창 증거 변경 전의 기록입니다. 이번 변경에 추가한 집중 테스트는 실행하지 않았습니다. 설치/setup·이전 경계, 호스트별 목록, 독립 generation/Offline/오류, 로컬 전용 전달을 포함합니다. 실제 KV 변경·하위 프로세스·질문·에이전트 ask는 하네스 밖으로 나가지 않습니다. 실제 원격 SDK 에이전트나 서명된 중립 앱 재연결 증거가 아니며 과거 44/44 결과를 현재 결과로 인용하지 않습니다.
 
 ### 과거 네이티브 소스 증거와 당시 일치하는 설치의 차단 사유
 

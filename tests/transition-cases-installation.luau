@@ -68,20 +68,130 @@ return function(shared)
 		expect(request.argv[1] == "/app/DesktopPet.app/Contents/MacOS/desktop-pet" and #f.writes == 0, "locator route did not remain readonly")
 	end)
 
-	case("legacy Herdr executable migration is proposed and saved only on consent", function(f)
-		f.kv.connection = { version = 1, executable = "/old/herdr-desktop-pet", config_dir = "/old/config", state_dir = "/old/state" }
+	local function legacy_route()
+		return { version = 1, executable = "/old/herdr-desktop-pet", config_dir = "/old/config", state_dir = "/old/state" }
+	end
+
+	local function approved_route()
+		return { version = 1, kind = "legacy-migration-route", committed = true, original = legacy_route(),
+			target = { version = 1, executable = "/bin/desktop-pet", config_dir = "/old/config", state_dir = "/old/state" } }
+	end
+
+	case("committed native approval migrates exact legacy route without prompts", function(f)
+		f.kv.connection = legacy_route(); f.migration_available = true
+		local request = f:poll()
+		expect(#f.prompts == 0 and #f.setup_requests == 5 and f:connection_writes() == 1, "approved migration required another acknowledgement or skipped proof")
+		expect(request.argv[1] == "/bin/desktop-pet" and request.argv[4] == "/old/config" and request.argv[6] == "/old/state", "migration mixed the original route pair")
+		expect(same_profile(f.kv.connection, approved_route().target), "migration did not atomically save its verified target")
+		expect(request.body.instance_id == nil and #request.body.results == 0 and request.body.sequence == 1, "migration replayed a binding or report")
+		f:ok(request); f:ok(f:poll())
+		expect(#f.setup_requests == 5 and f:connection_writes() == 1 and #f.prompts == 0, "migration repeated proof, save, or prompts after cutover")
+	end)
+
+	case("legacy command name proof retains exact original spelling and paths", function(f, real)
+		f.kv = { executable = "herdr-desktop-pet", config_dir = "/old/config", state_dir = "/old/state" }
+		f.migration_available = true
+		local request = f:poll()
+		local original = real.json.decode(f.setup_requests[5].options.stdin)
+		expect(original.executable == "herdr-desktop-pet", "legacy query invented an absolute source path")
+		expect(f:connection_writes() == 1 and f.kv.executable == nil and f.kv.config_dir == nil and f.kv.state_dir == nil, "approved old tuple was not canonicalized as a whole")
+		expect(request.argv[4] == "/old/config" and request.argv[6] == "/old/state", "old tuple migration changed native paths")
+	end)
+
+	case("unapproved legacy route stays unchanged and reconnects on later periodic proof", function(f)
+		f.kv.connection = legacy_route()
 		f:poll()
-		expect(#f.setup_requests == 0 and #f.requests == 0 and #f.writes == 0, "Connect treated legacy name as a neutral discovery alias")
-		f:configure()
-		expect(f.prompts[1].value == "/bin/desktop-pet", "Configure did not propose neutral executable")
-		f:answer("/bin/desktop-pet")
-		expect(f.prompts[1].value == "/old/config", "migration lost existing config")
-		f:answer("/old/config")
-		expect(f.prompts[1].value == "/old/state", "migration lost existing state")
-		f:answer(nil)
-		expect(f.kv.connection.executable == "/old/herdr-desktop-pet" and #f.writes == 0, "cancel committed migration")
-		f:save({ executable = "/bin/desktop-pet", config_dir = "/old/config", state_dir = "/old/state" })
-		expect(f:connection_writes() == 1 and f.kv.connection.config_dir == "/old/config" and f.kv.connection.state_dir == "/old/state", "consented migration was not one whole tuple")
+		expect(#f.requests == 0 and #f.writes == 0 and #f.prompts == 0 and same_profile(f.kv.connection, legacy_route()), "discovered installation substituted for missing approval")
+		expect(#f.toasts > 0 and f.toasts[#f.toasts].message:find("no committed approved route", 1, true), "missing native proof/provider was hidden as success")
+		f.migration_available = true
+		local request = f:poll()
+		expect(request ~= nil and f:connection_writes() == 1 and #f.prompts == 0, "later native commit required manual Connect or Configure")
+	end)
+
+	for _, field in ipairs({ "executable", "config_dir", "state_dir" }) do
+		local mismatched = field
+		for _, side in ipairs({ "original", "target" }) do
+			local route_side = side
+			case("migration rejects mismatched " .. side .. " " .. field, function(f)
+				f.kv.connection = legacy_route(); f.migration_available = true; f.migration_proof = approved_route()
+				f.migration_proof[route_side][mismatched] = "/different/" .. mismatched
+				f:poll()
+				expect(#f.requests == 0 and #f.writes == 0 and #f.prompts == 0
+					and same_profile(f.kv.connection, legacy_route()), "mismatched native proof committed a route")
+			end)
+		end
+	end
+
+	case("uncommitted migration cannot save a discovered route", function(f)
+		f.kv.connection = legacy_route(); f.migration_available = true; f.migration_proof = approved_route()
+		f.migration_proof.committed = false; f:poll()
+		expect(#f.requests == 0 and #f.writes == 0 and same_profile(f.kv.connection, legacy_route()), "uncommitted route proof became installation authority")
+	end)
+
+	for _, failure in ipairs({ "setup_failure", "setup_timeout", "setup_json_error" }) do
+		local failed_kind = failure
+		case("migration " .. failure .. " preserves saved original and exposes failure", function(f)
+			f.kv.connection = legacy_route(); f.migration_available = true; f[failed_kind] = "migration"
+			f:poll()
+			expect(#f.requests == 0 and #f.writes == 0 and #f.prompts == 0 and #f.toasts > 0
+				and same_profile(f.kv.connection, legacy_route()), "failed migration proof changed the route or claimed success")
+		end)
+	end
+
+	case("migration atomic save failure leaves original tuple intact", function(f)
+		f.kv.connection = legacy_route(); f.migration_available = true; f.save_error = true
+		f:poll()
+		expect(#f.requests == 0 and #f.writes == 0 and same_profile(f.kv.connection, legacy_route()), "failed migration save partially cut over")
+		f.save_error = false
+		expect(f:poll() ~= nil and f:connection_writes() == 1, "atomic save failure required another approval")
+	end)
+
+	case("periodic migration does not overlap a pending native proof", function(f)
+		f.kv.connection = legacy_route(); f.migration_available = true; f.hold_migration = true
+		f:poll(); f:poll(); f:poll()
+		expect(#f.setup_requests == 5 and #f.requests == 0 and #f.writes == 0, "ticks overlapped a pending migration proof")
+		f.hold_migration = false; f:complete_setup()
+		expect(#f.requests == 1 and f:connection_writes() == 1, "pending migration proof did not cut over exactly once")
+	end)
+
+	case("stale migration proof cannot overwrite another window's route", function(f)
+		f.kv.connection = legacy_route(); f.migration_available = true; f.hold_migration = true
+		f:poll()
+		f.kv.connection = profile("external")
+		f.hold_migration = false; f:complete_setup()
+		expect(#f.requests == 0 and #f.writes == 0 and same_profile(f.kv.connection, profile("external")), "stale migration proof overwrote another window")
+		local request = f:poll()
+		expect(request.argv[1] == "/bin/pet-external" and request.argv[4] == "/config/external"
+			and request.argv[6] == "/state/external", "next tick failed to validate the exact winning route")
+	end)
+
+	case("late migration proof is fenced by a newer cancelled Configure", function(f)
+		f.kv.connection = legacy_route(); f.migration_available = true; f.hold_migration = true
+		f:poll(); f:configure(); f:answer(nil)
+		f.hold_migration = false; f:complete_setup()
+		expect(#f.requests == 0 and #f.writes == 0 and same_profile(f.kv.connection, legacy_route()), "obsolete migration proof survived newer setup")
+		expect(f:poll() ~= nil and f:connection_writes() == 1, "cancelled manual proposal disabled native-approved automatic migration")
+	end)
+
+	case("active window automatically validates another window's atomic route without replay", function(f)
+		f:bind(); f:offer()
+		local old = f.requests[#f.requests]
+		expect(#old.body.results == 1 and #f.asks == 1, "fixture lacks an uncertain pending result")
+		f.kv.connection = profile("external")
+		local fresh = f:poll()
+		fresh_source(old, fresh)
+		expect(fresh.argv[1] == "/bin/pet-external" and fresh.argv[4] == "/config/external"
+			and fresh.argv[6] == "/state/external", "active window failed exact automatic reconnect")
+		f:ok(old, { operation_id = "old-route", pane = "1", text = "never" })
+		expect(#f.asks == 1 and #fresh.body.results == 0, "automatic reconnect replayed an old ask or result")
+	end)
+
+	case("active route replacement failure never falls back to discovery", function(f)
+		f:bind(); f.kv.connection = profile("external"); f.setup_failure = "proof"
+		f:poll()
+		expect(#f.requests == 1 and #f.writes == 0 and #f.toasts > 0, "invalid replacement kept polling stale route or silently substituted")
+		local probe = f.setup_requests[#f.setup_requests]
+		expect(probe.argv[5] == "/bin/pet-external" and probe.argv[6] == "/bin/pet-external", "custom replacement became neutral discovery")
 	end)
 
 	case("custom executable is never replaced by discovered proposal", function(f)

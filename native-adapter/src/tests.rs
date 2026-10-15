@@ -607,6 +607,101 @@ fn evidence_requires_actual_confirmed_fresh_reconnect_and_observation_survives_g
 }
 
 #[test]
+fn evidence_without_window_selects_only_an_actual_fresh_confirmed_local_binding() {
+    let fixture = Fixture::new();
+    let extensions = fixture.integration.extensions();
+    let evidence = extensions.control.iter().find(|extension| extension.kind() == "tern-migration-evidence").unwrap();
+    let any = br#"{"version":1,"kind":"tern-migration-evidence"}"#;
+    assert!(evidence.handle_frame(any).is_err(), "an empty registry cannot create evidence");
+    for name in ["stale", "unconfirmed", "wrong-generation", "fresh"] {
+        let mut poll = request(name);
+        if name == "fresh" { poll.epoch = 37; poll.hosts[0].observation_generation = 8; }
+        assert!(fixture.exchange(&poll).ok);
+        if name != "unconfirmed" {
+            poll.sequence = 2; poll.instance_id = Some("daemon-a".into());
+            assert!(fixture.exchange(&poll).ok);
+        }
+    }
+    fixture.age("stale");
+    fixture.with_state(|domain, _| {
+        domain.sources.get_mut(&protocol::source_id("wrong-generation", "0")).unwrap().generation += 1;
+    });
+    let reply: Value = serde_json::from_slice(&evidence.handle_frame(any).unwrap()).unwrap();
+    assert_eq!(reply["window_id"], "fresh");
+    assert_eq!(reply["instance_id"], "daemon-a");
+    assert_eq!(reply["binding_epoch"], 37);
+    assert_eq!(reply["sequence"], 2);
+    assert_eq!(reply["local_host"], "0");
+    assert_eq!(reply["observation_generation"], 8);
+    assert_eq!(reply["native_generation"], 1);
+    assert_eq!(reply["fresh"], true);
+    let exact = br#"{"version":1,"kind":"tern-migration-evidence","window_id":"fresh"}"#;
+    let exact_reply: Value = serde_json::from_slice(&evidence.handle_frame(exact).unwrap()).unwrap();
+    assert_eq!(reply, exact_reply, "omitted window must report the same real binding as the exact query");
+    for window in ["stale", "unconfirmed", "wrong-generation", "missing"] {
+        let query = json!({"version":1,"kind":"tern-migration-evidence","window_id":window});
+        assert!(evidence.handle_frame(&serde_json::to_vec(&query).unwrap()).is_err(), "exact selection must never fall back to another window");
+    }
+    fixture.age("fresh");
+    assert!(evidence.handle_frame(any).is_err(), "no eligible binding must remain a real failure");
+}
+
+#[test]
+fn evidence_rejects_offline_remote_readonly_retired_and_unconfirmed_current_sources() {
+    for invalid in ["offline-window", "offline-host", "stale-host", "remote-host", "remote-source",
+        "readonly", "provider", "retired", "unconfirmed", "disabled"] {
+        let fixture = Fixture::new();
+        let mut poll = request("binding");
+        assert!(fixture.exchange(&poll).ok);
+        poll.sequence = 2; poll.instance_id = Some("daemon-a".into());
+        assert!(fixture.exchange(&poll).ok);
+        fixture.with_state(|domain, state| {
+            let window = state.registry.get_mut("binding").unwrap();
+            match invalid {
+                "offline-window" => window.offline = true,
+                "offline-host" => window.hosts.get_mut("0").unwrap().offline = true,
+                "stale-host" => window.hosts.get_mut("0").unwrap().last_seen = Instant::now() - FRESHNESS,
+                "remote-host" => window.hosts.get_mut("0").unwrap().is_local = false,
+                "remote-source" => domain.sources.get_mut(&protocol::source_id("binding", "0")).unwrap().descriptor.locality = SourceLocality::Remote,
+                "readonly" => domain.sources.get_mut(&protocol::source_id("binding", "0")).unwrap().descriptor.capabilities.prompt = false,
+                "provider" => domain.sources.get_mut(&protocol::source_id("binding", "0")).unwrap().descriptor.provider = "other".into(),
+                "retired" => { domain.sources.remove(&protocol::source_id("binding", "0")); }
+                "unconfirmed" => window.confirmed_sequence = Some(1),
+                "disabled" => state.enabled = false,
+                _ => unreachable!(),
+            }
+        });
+        let extensions = fixture.integration.extensions();
+        let evidence = extensions.control.iter().find(|extension| extension.kind() == "tern-migration-evidence").unwrap();
+        for query in [br#"{"version":1,"kind":"tern-migration-evidence"}"#.as_slice(),
+            br#"{"version":1,"kind":"tern-migration-evidence","window_id":"binding"}"#.as_slice()] {
+            assert!(evidence.handle_frame(query).is_err(), "{invalid} must not become reconnect evidence");
+        }
+    }
+}
+
+#[test]
+fn optional_evidence_window_still_rejects_invalid_identity_and_unknown_fields() {
+    let fixture = Fixture::new();
+    let mut poll = request("binding");
+    assert!(fixture.exchange(&poll).ok);
+    poll.sequence = 2; poll.instance_id = Some("daemon-a".into());
+    assert!(fixture.exchange(&poll).ok);
+    let extensions = fixture.integration.extensions();
+    let evidence = extensions.control.iter().find(|extension| extension.kind() == "tern-migration-evidence").unwrap();
+    for query in [
+        json!({"version":1,"kind":"tern-migration-evidence","window_id":""}),
+        json!({"version":1,"kind":"tern-migration-evidence","window_id":"bad\0window"}),
+        json!({"version":1,"kind":"tern-migration-evidence","window_id":"x".repeat(4097)}),
+        json!({"version":1,"kind":"tern-migration-evidence","window_id":7}),
+        json!({"version":1,"kind":"tern-migration-evidence","fresh":true}),
+    ] {
+        assert!(evidence.handle_frame(&serde_json::to_vec(&query).unwrap()).is_err());
+    }
+    assert!(evidence.handle_frame(br#"{"version":1,"kind":"tern-migration-evidence","window_id":"binding","window_id":"binding"}"#).is_err());
+}
+
+#[test]
 fn hostile_empty_label_uses_adapter_owned_numeric_host_fallback() {
     let fixture = Fixture::new(); let mut poll = request("label"); poll.hosts[0].label = "\u{202E} \u{200B}".into();
     assert!(fixture.exchange(&poll).ok);

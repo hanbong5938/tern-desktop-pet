@@ -8,7 +8,7 @@ const LIMIT: usize = 16 * 1024;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Request { version: u64, kind: String, window_id: String }
+struct Request { version: u64, kind: String, window_id: Option<String> }
 
 #[derive(Serialize)]
 #[serde(deny_unknown_fields)]
@@ -34,8 +34,8 @@ impl ControlExtension for EvidenceHandler {
         if frame.len() > LIMIT { return Err("Tern migration evidence request exceeds limit".into()); }
         crate::transport::reject_duplicate_json_keys(frame)?;
         let request: Request = serde_json::from_slice(frame).map_err(|error| error.to_string())?;
-        if request.version != 1 || request.kind != self.kind() || request.window_id.is_empty()
-            || request.window_id.len() > 4096 || request.window_id.contains('\0') {
+        if request.version != 1 || request.kind != self.kind()
+            || request.window_id.as_ref().is_some_and(|id| id.is_empty() || id.len() > 4096 || id.contains('\0')) {
             return Err("invalid Tern migration evidence request".into());
         }
         let runtime = self.integration.runtime.get().ok_or("Tern runtime is not started")?;
@@ -44,25 +44,35 @@ impl ControlExtension for EvidenceHandler {
             evidence = (|| {
                 let state = self.integration.state.lock().map_err(|_| "Tern source registry lock poisoned".to_owned())?;
                 if !state.enabled { return Err("Tern observation is unavailable".into()); }
-                let window = state.registry.get(&request.window_id).ok_or("Tern window is not registered")?;
                 let now = Instant::now();
-                if !window.bound || window.offline || now.saturating_duration_since(window.last_seen) >= FRESHNESS
-                    || window.confirmed_sequence != Some(window.sequence) {
-                    return Err("Tern binding has not confirmed the current daemon or is stale".into());
+                let binding = |id: &str, window: &crate::registry::Window| -> Result<Reply, &'static str> {
+                    if !window.bound || window.offline || now.saturating_duration_since(window.last_seen) >= FRESHNESS
+                        || window.confirmed_sequence != Some(window.sequence) {
+                        return Err("Tern binding has not confirmed the current daemon or is stale");
+                    }
+                    let mut locals = window.hosts.iter().filter(|(_, host)| host.is_local && !host.offline
+                        && now.saturating_duration_since(host.last_seen) < FRESHNESS);
+                    let (local_id, host) = locals.next().ok_or("Tern window has no fresh local host")?;
+                    if locals.next().is_some() { return Err("Tern local host binding is ambiguous"); }
+                    let descriptor = domain.source_descriptor(&host.source).ok_or("Tern local source is retired")?;
+                    if domain.instance_id().is_empty() || host.generation == 0 || host.observation_generation == 0
+                        || domain.source_generation(&host.source) != Some(host.generation)
+                        || descriptor.provider != crate::PROVIDER_ID || descriptor.locality != SourceLocality::Local
+                        || !descriptor.capabilities.prompt {
+                        return Err("Tern local source binding is stale or read-only");
+                    }
+                    Ok(Reply { version: 1, kind: self.kind(), instance_id: domain.instance_id().into(), window_id: id.into(),
+                        binding_epoch: window.epoch, sequence: window.sequence, local_host: local_id.clone(),
+                        observation_generation: host.observation_generation, native_generation: host.generation, fresh: true })
+                };
+                if let Some(id) = request.window_id.as_deref() {
+                    let window = state.registry.get(id).ok_or("Tern window is not registered")?;
+                    return binding(id, window).map_err(str::to_owned);
                 }
-                let mut locals = window.hosts.iter().filter(|(_, host)| host.is_local && !host.offline
-                    && now.saturating_duration_since(host.last_seen) < FRESHNESS);
-                let (id, host) = locals.next().ok_or("Tern window has no fresh local host")?;
-                if locals.next().is_some() { return Err("Tern local host binding is ambiguous".into()); }
-                let descriptor = domain.source_descriptor(&host.source).ok_or("Tern local source is retired")?;
-                if domain.instance_id().is_empty() || domain.source_generation(&host.source) != Some(host.generation)
-                    || descriptor.provider != crate::PROVIDER_ID || descriptor.locality != SourceLocality::Local
-                    || !descriptor.capabilities.prompt {
-                    return Err("Tern local source binding is stale or read-only".into());
-                }
-                Ok(Reply { version: 1, kind: self.kind(), instance_id: domain.instance_id().into(), window_id: request.window_id.clone(),
-                    binding_epoch: window.epoch, sequence: window.sequence, local_host: id.clone(),
-                    observation_generation: host.observation_generation, native_generation: host.generation, fresh: true })
+                // Selection is observational only: skip unconfirmed, remote, stale,
+                // or retired entries instead of manufacturing a reconnect identity.
+                let selected = state.registry.windows().find_map(|(id, window)| binding(id, window).ok());
+                selected.ok_or_else(|| "no fresh confirmed Tern local binding".to_owned())
             })();
         })?;
         let mut bytes = serde_json::to_vec(&evidence?).map_err(|error| error.to_string())?;
