@@ -41,6 +41,8 @@ return function(shared)
 	local function fixture(entry, real, initial)
 		local f = { clock = 1000, requests = {}, asks = {}, gets = {}, prompts = {}, writes = {}, logs = {}, toasts = {},
 			stages = {}, setup_requests = {}, setup_pending = {}, inventory_reads = {}, callback_samples = {}, disabled_hooks = 0,
+			missing_executables = {}, missing_invocations = {}, load_reads = {},
+			handover_requests = {}, handover_pending = {}, bound_windows = {}, issued_handovers = {}, handover_receipts = {},
 			native_generations = { ["0"] = 7, ["1"] = 11 } }
 		local function clone(value)
 			if value == nil then
@@ -59,6 +61,11 @@ return function(shared)
 			sessions = { { id = 100, name = "local session", tabs = { 10 } }, { id = 200, name = "remote session", tabs = { 20 } } },
 			agents = { { pane = 1, cwd = "/local", state = "idle" }, { pane = 2, cwd = "/remote", state = "working" } },
 		}
+		function f:handover_authority()
+			return { operation_id = string.rep("d", 32), plan_path = "/approved/migration-plan.json",
+				plan_sha256 = string.rep("b", 64), token = string.rep("c", 64),
+				consumer_revision = string.rep("a", 40), target_instance_id = self.native_instance or "daemon-a" }
+		end
 		local function fresh_context()
 			local live = true
 			local function check()
@@ -134,13 +141,19 @@ return function(shared)
 		end
 		local initializing = true
 		local commands = {}
+		local events = {}
 		local api = {
 			json = real.json,
-			now = function() f.clock += 1; return f.clock end,
+			now = function()
+				if initializing then table.insert(f.load_reads, "clock") end
+				f.clock += 1
+				return f.clock
+			end,
 			getenv = function(key) return key == "HOME" and "/home/test" or nil end,
 			log = { warn = function(message) table.insert(f.logs, message) end },
 			kv = {
 				get = function(key)
+					if initializing then table.insert(f.load_reads, "KV") end
 					if f.read_error then error("injected KV read failure") end
 					return clone(f.kv[key])
 				end,
@@ -149,6 +162,7 @@ return function(shared)
 					if key ~= "connection" and f.cleanup_error then error("injected cleanup failure") end
 					f.kv[key] = clone(value)
 					table.insert(f.writes, { key = key, value = clone(value) })
+					if key == "connection" and f.after_connection_save then f.after_connection_save() end
 				end,
 			},
 			timer = function(ms, callback)
@@ -167,9 +181,14 @@ return function(shared)
 					table.insert(f.stages, { callback = callback, delay_ms = ms, microtask = true })
 				end }
 			end,
-			on = function() end,
+			on = function(event, callback) events[event] = callback end,
 			command = function(definition) commands[definition.id] = definition.run end,
 			process = { run = function(argv, options, callback)
+				if initializing then table.insert(f.load_reads, "process") end
+				if f.missing_executables[argv[1]] then
+					table.insert(f.missing_invocations, argv[1])
+					error("injected missing executable: " .. argv[1])
+				end
 				if argv[2] == "tern-exchange" then
 					expect(callback == nil, "exchange did not use the real process awaitable API")
 					expect(#options.stdin <= 256 * 1024, "request exceeded its independent JSON cap")
@@ -180,6 +199,36 @@ return function(shared)
 						and request.body.agents == nil and request.body.generation == nil, "exchange did not cut over to host-based v2")
 					table.insert(f.requests, request)
 					return { next = function(_, next_callback) request.callback = next_callback end }
+				end
+				if argv[2] == "migration-integration-handover" then
+					expect(callback == nil and options.timeout_ms > 0 and options.timeout_ms <= 10000, "handover subprocess was not bounded")
+					expect(options.env.DESKTOP_PET_CONFIG_DIR == argv[4] and options.env.DESKTOP_PET_STATE_DIR == argv[6],
+						"handover mixed profile environment and arguments")
+					local request = { argv = argv, options = options, body = real.json.decode(options.stdin) }
+					expect(request.body.version == 1 and request.body.kind == argv[2] and request.body.loaded_protocol == 1
+						and type(request.body.window_id) == "string", "handover omitted loaded protocol or actual source window")
+					table.insert(f.handover_requests, request)
+					return { next = function(_, next_callback)
+						local function complete(_, _err, cx)
+							local binding = f.bound_windows[request.body.window_id]
+							local issued = f.issued_handovers[request.body.handover.token]
+							local valid = binding ~= nil and binding.result_free and binding.executable == argv[1]
+								and binding.config_dir == argv[4] and binding.state_dir == argv[6]
+								and (f.native_instance == nil or f.native_instance == binding.instance_id)
+								and issued ~= nil and type(f.kv.connection) == "table" and same_profile(f.kv.connection, request.body.target)
+								and real.json.encode(request.body.handover) == real.json.encode(issued.handover)
+								and same_profile(request.body.original, issued.original) and same_profile(request.body.target, issued.target)
+							local response = f.handover_response or { version = 1, kind = "migration-integration-handover", confirmed = true,
+								window_id = request.body.window_id, target_instance_id = binding and binding.instance_id or "missing" }
+							local denied = not valid or f.handover_denied or f.handover_package_invalid
+							if not denied and not f.handover_timeout then table.insert(f.handover_receipts, clone(request.body)) end
+							if f.handover_json_error then response = nil end
+							next_callback({ status = denied and 1 or 0, timed_out = f.handover_timeout or false,
+								stdout = response and real.json.encode(response) or "not JSON", stderr = "native handover evidence rejected" }, nil, cx)
+						end
+						if f.hold_handover then table.insert(f.handover_pending, complete)
+						else table.insert(f.stages, { callback = complete, delay_ms = 0, microtask = true }) end
+					end }
 				end
 				expect(callback == nil and options.timeout_ms > 0, "setup did not use bounded awaitable subprocess")
 				if f.setup_spawn_error then error("injected permission/spawn failure") end
@@ -198,7 +247,8 @@ return function(shared)
 								protocol = 4, observation_mode = 2, integration_api = 1 })
 						elseif argv[2] == "update-capabilities" then
 							stage = "capability"
-							value = real.json.encode({ integration_api = f.integration_api or 1, protocol = 4, observation_mode = 2, app_version = "0.4.0" })
+							value = real.json.encode({ integration_api = f.integration_api or 1, protocol = 4, observation_mode = 2,
+								app_version = "0.4.0", migration_handover_protocol = f.handover_protocol })
 						elseif argv[2] == "legacy-migration-route" then
 							stage = "migration"
 							local original = real.json.decode(options.stdin)
@@ -206,11 +256,16 @@ return function(shared)
 							expect(argv[4] == original.config_dir and argv[6] == original.state_dir
 								and options.env.DESKTOP_PET_CONFIG_DIR == original.config_dir
 								and options.env.DESKTOP_PET_STATE_DIR == original.state_dir, "migration proof changed the original profile pair")
-							value = real.json.encode(f.migration_proof or {
+							local proof = f.migration_proof or {
 								version = 1, kind = "legacy-migration-route", committed = true,
 								original = { version = 1, executable = original.executable, config_dir = original.config_dir, state_dir = original.state_dir },
 								target = { version = 1, executable = argv[1], config_dir = original.config_dir, state_dir = original.state_dir },
-							})
+								handover = f.handover_available and f:handover_authority() or nil,
+							}
+							if type(proof.handover) == "table" and type(proof.handover.token) == "string" then
+								f.issued_handovers[proof.handover.token] = clone(proof)
+							end
+							value = real.json.encode(proof)
 						else
 							expect(argv[2] == "profile" and argv[3] == "show" and argv[4] == "--json", "unsupported setup command")
 							stage = "profile"
@@ -221,7 +276,13 @@ return function(shared)
 						end
 						if f.setup_json_error == stage then value = "not JSON" end
 						if stage == "proof" and f.no_installation then value = "null" end
-						pending.callback({ status = (f.setup_failure == stage or (stage == "migration" and not f.migration_available)) and 1 or 0,
+						local setup_failed = f.setup_failure == stage
+						if setup_failed and f.setup_failure_route ~= nil then
+							local selected = (argv[4] == "desktop-pet-discover" or argv[4] == "desktop-pet-verify") and argv[5] or argv[1]
+							setup_failed = selected == f.setup_failure_route
+						end
+						if stage == "proof" and f.missing_executables[argv[5]] then setup_failed = true end
+						pending.callback({ status = (setup_failed or (stage == "migration" and not f.migration_available)) and 1 or 0,
 							timed_out = f.setup_timeout == stage, stdout = value,
 							stderr = stage == "migration" and "no committed approved route or Tern provider unavailable" or "injected proof failure" }, nil, cx)
 					end
@@ -280,6 +341,10 @@ return function(shared)
 			end
 			return self.requests[#self.requests]
 		end
+		function f:window_start()
+			self:invoke(events.window_start, "window_start")
+			self:drain()
+		end
 		function f:connect()
 			self:invoke(commands.connect, "connect")
 			self:drain()
@@ -304,11 +369,27 @@ return function(shared)
 			self:invoke(function(cx) pending(nil, nil, cx) end, "delayed setup")
 			self:drain()
 		end
+		function f:complete_handover()
+			local pending = table.remove(self.handover_pending, 1)
+			expect(pending ~= nil, "no delayed handover receipt")
+			self:invoke(function(cx) pending(nil, nil, cx) end, "handover receipt")
+			self:drain()
+		end
+		function f:route_queries()
+			local count = 0
+			for _, query in ipairs(self.setup_requests) do if query.argv[2] == "legacy-migration-route" then count += 1 end end
+			return count
+		end
 		function f:deliver(request, response, options)
 			options = options or {}
 			-- The native helper encodes before completion; don't charge fixture-side
 			-- encoding and production decoding to the same real callback.
 			local stdout = options.stdout or encode_fixture(real, response, "encode helper stdout") .. "\n"
+			if response.ok == true and request.body.instance_id == response.instance_id then
+				self.bound_windows[request.body.window] = { instance_id = response.instance_id,
+					executable = request.argv[1], config_dir = request.argv[4], state_dir = request.argv[6],
+					epoch = request.body.epoch, sequence = request.body.sequence, result_free = #request.body.results == 0 }
+			end
 			self:invoke(function(cx)
 				request.callback({ status = options.status or 0, timed_out = options.timed_out or false,
 					stdout = stdout, stderr = "injected helper" }, options.process_error, cx)

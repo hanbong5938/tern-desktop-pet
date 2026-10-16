@@ -58,7 +58,8 @@ local function new_identity()
 	return window, epoch
 end
 
-local window, epoch = new_identity()
+-- Establish the source only after asynchronous setup, not during cold load.
+local window, epoch
 local incarnation = 1
 local sequence = 0
 local instance_id = nil
@@ -67,7 +68,7 @@ local native_generations = {}
 local local_identity = nil
 local results_identity = nil
 local busy = false
-local results = tern.json.array()
+local results = nil
 local active_exchange = nil
 local last_error = nil
 local last_error_at = 0
@@ -100,8 +101,17 @@ local SETUP_RESPONSE_BYTES = 32 * 1024
 local setup_serial = 0
 local setup_pending = nil
 local automatic_reconnect = false
+local route_repair_required = false
 local active_storage = nil
-local INSTALL_ADVICE = "Approved saved legacy-route migration reconnects automatically when native is ready. Configure is for new/manual setup or repair with an absolute executable and both profile paths. Install Desktop Pet separately from https://github.com/hanbong5938/desktop-pet; the plugin never installs or starts the app."
+local handover_enabled = false
+local validate_handover
+local approved_handover = nil
+local handover_route_at = 0
+local handover_work = nil
+local handover_probe_at = 0
+local handover_error = false
+local HANDOVER_INTERVAL_MS = 10000
+local INSTALL_ADVICE = "Approved saved-route migration reconnects automatically when native is ready. Configure is for new/manual setup or repair with an absolute executable and both profile paths. Install Desktop Pet separately from https://github.com/hanbong5938/desktop-pet; the plugin never installs or starts the app."
 
 local function absolute_path(value)
 	return type(value) == "string" and value:sub(1, 1) == "/" and #value <= MAX_FIELD_BYTES
@@ -110,6 +120,10 @@ end
 
 local function legacy_executable(value)
 	return type(value) == "string" and (value == "herdr-desktop-pet" or value:match("/herdr%-desktop%-pet$") ~= nil)
+end
+
+local function neutral_executable(value)
+	return type(value) == "string" and value:match("/desktop%-pet$") ~= nil
 end
 
 local function validate_connection(connection)
@@ -264,7 +278,13 @@ fi
 exec "$helper" discover --json
 ]]
 
-local function setup_process(argv, options, cx, current, ready)
+local function setup_process(argv, options, cx, current, ready, failed)
+	local function fail(message, fresh_cx)
+		setup_pending = nil
+		if failed ~= nil then failed(tostring(message), fresh_cx)
+		else show_error(fresh_cx, tostring(message) .. "\n" .. INSTALL_ADVICE) end
+	end
+	setup_pending = setup_serial
 	local started, message = pcall(function()
 		tern.process.run(argv, options):next(function(result, err, fresh_cx)
 			if not current(fresh_cx) then return end
@@ -275,22 +295,17 @@ local function setup_process(argv, options, cx, current, ready)
 				if type(result.stdout) ~= "string" or #result.stdout > SETUP_RESPONSE_BYTES then error("invalid or oversized native discovery/profile response") end
 				ready(result.stdout, fresh_cx)
 			end)
-			if not ok then
-				setup_pending = nil
-				show_error(fresh_cx, tostring(failure) .. "\n" .. INSTALL_ADVICE)
-			end
+			if not ok then fail(failure, fresh_cx) end
 		end)
 	end)
-	if not started then
-		setup_pending = nil
-		show_error(cx, tostring(message) .. "\n" .. INSTALL_ADVICE)
-	end
+	if not started and current(cx) then fail(message, cx) end
 end
 
-local function resolve_connection(explicit, paths, cx, current, ready)
+local function resolve_connection(explicit, paths, cx, current, ready, failed)
 	if explicit ~= nil and not absolute_path(explicit) then
 		setup_pending = nil
-		show_error(cx, "Executable must be absolute. " .. INSTALL_ADVICE)
+		if failed ~= nil then failed("Executable must be absolute", cx)
+		else show_error(cx, "Executable must be absolute. " .. INSTALL_ADVICE) end
 		return
 	end
 	local options = { timeout_ms = SETUP_TIMEOUT_MS }
@@ -324,6 +339,9 @@ local function resolve_connection(explicit, paths, cx, current, ready)
 				if type(capability) ~= "table" or capability.integration_api ~= 1 then
 					error("native app does not support integration_api:1; upgrade Desktop Pet separately")
 				end
+				if capability.migration_handover_protocol ~= nil and capability.migration_handover_protocol ~= 1 then
+					error("unsupported native migration handover protocol")
+				end
 				local argv = { proof.executable, "profile", "show", "--json" }
 				local profile_options = { timeout_ms = SETUP_TIMEOUT_MS }
 				if paths ~= nil then
@@ -342,17 +360,17 @@ local function resolve_connection(explicit, paths, cx, current, ready)
 					if paths ~= nil and (connection.config_dir ~= paths.config_dir or connection.state_dir ~= paths.state_dir) then
 						error("native profile does not match both explicitly selected paths")
 					end
-					ready(connection, profile_cx)
-				end)
-			end)
-		end)
-	end)
+					ready(connection, profile_cx, capability.migration_handover_protocol == 1)
+				end, failed)
+			end, failed)
+		end, failed)
+	end, failed)
 end
 
-local function resolve_migration(connection, cx, current, ready)
+local function resolve_migration(connection, cx, current, ready, failed)
 	-- Discovery locates the signed query transport, never grants route authority.
-	-- Only native's authenticated committed approval may replace a legacy route.
-	resolve_connection(nil, connection, cx, current, function(validated, proof_cx)
+	-- Only native's authenticated committed approval may replace a saved route.
+	resolve_connection(nil, connection, cx, current, function(validated, proof_cx, supports_handover)
 		setup_process({ validated.executable, "legacy-migration-route", "--config-dir", connection.config_dir,
 			"--state-dir", connection.state_dir }, {
 			timeout_ms = SETUP_TIMEOUT_MS,
@@ -364,16 +382,21 @@ local function resolve_migration(connection, cx, current, ready)
 			if type(proof) ~= "table" or proof.version ~= 1 or proof.kind ~= "legacy-migration-route"
 				or proof.committed ~= true then error("native migration route is not committed and approved") end
 			for key in pairs(proof) do
-				if key ~= "version" and key ~= "kind" and key ~= "committed" and key ~= "original" and key ~= "target" then
+				if key ~= "version" and key ~= "kind" and key ~= "committed" and key ~= "original" and key ~= "target" and key ~= "handover" then
 					error("unknown native migration route proof field")
 				end
 			end
 			local original, target = validate_connection(proof.original), validate_connection(proof.target)
 			if not same_connection(original, connection) then error("native migration proof does not match the exact saved original route") end
 			if not same_connection(target, validated) then error("native migration proof does not match the verified target and original profile pair") end
-			ready(target, route_cx)
-		end)
-	end)
+			local handover = nil
+			if proof.handover ~= nil then
+				if not supports_handover then error("native handover authority requires protocol 1 capability") end
+				handover = { authority = validate_handover(proof.handover), original = original, target = target }
+			end
+			ready(target, route_cx, supports_handover, handover)
+		end, failed)
+	end, failed)
 end
 
 local function build_inventory(hosts, panes, tabs, sessions, agents)
@@ -562,7 +585,8 @@ local function build_inventory(hosts, panes, tabs, sessions, agents)
 			kind = record.kind, address = record.address, panes = known_panes,
 			available = snapshot.status == "available" }
 		if snapshot.is_local then
-			current_local = { host = snapshot.host, observation_generation = snapshot.observation_generation }
+			current_local = { host = snapshot.host, observation_generation = snapshot.observation_generation,
+				available = snapshot.status == "available" }
 			if snapshot.status == "available" then
 				for _, row in ipairs(snapshot.agents) do
 					reply_by_pane[row.pane] = { id = tonumber(row.pane), row = row,
@@ -602,6 +626,11 @@ local function reset_identity()
 	active_exchange = nil
 	last_error = nil
 	setup_pending = nil
+	handover_work = nil
+	handover_probe_at = 0
+	handover_error = false
+	approved_handover = nil
+	handover_route_at = 0
 end
 
 local function refresh_connection()
@@ -612,6 +641,7 @@ local function refresh_connection()
 		reset_identity()
 		active_connection = nil
 		active_storage = nil
+		handover_enabled = false
 		setup_serial += 1
 		automatic_reconnect = true
 	end
@@ -713,7 +743,7 @@ local function collect_inventory(data, cx, ready, failed)
 	end
 end
 
-local exchange
+local exchange, save_connection
 
 local function report_command(data, command, accepted, failure, cx)
 	if not current_exchange(data, cx) then return end
@@ -821,6 +851,134 @@ local function validate_response(response, data)
 	return replies
 end
 
+validate_handover = function(authority)
+	if type(authority) ~= "table" then error("native omitted consumer handover authority") end
+	for key, value in pairs(authority) do
+		if key ~= "operation_id" and key ~= "plan_path" and key ~= "plan_sha256" and key ~= "token"
+			and key ~= "consumer_revision" and key ~= "target_instance_id" then error("unknown consumer handover field") end
+		if type(value) ~= "string" or value == "" or #value > MAX_FIELD_BYTES or value:find("[%z\r\n]") then
+			error("invalid consumer handover field")
+		end
+	end
+	for _, key in ipairs({ "operation_id", "plan_path", "plan_sha256", "token", "consumer_revision", "target_instance_id" }) do
+		if authority[key] == nil then error("incomplete consumer handover authority") end
+	end
+	if not absolute_path(authority.plan_path) or #authority.operation_id ~= 32 or authority.operation_id:find("[^0-9a-f]")
+		or #authority.plan_sha256 ~= 64 or authority.plan_sha256:find("[^0-9a-f]")
+		or #authority.token ~= 64 or authority.token:find("[^0-9a-f]")
+		or #authority.consumer_revision ~= 40 or authority.consumer_revision:find("[^0-9a-f]")
+		or #authority.target_instance_id > 128 then
+		error("invalid consumer handover identity, plan, token or revision")
+	end
+	return authority
+end
+
+local function current_handover(work, cx)
+	if handover_work ~= work then return false end
+	if cx == nil or work.incarnation ~= incarnation or work.window ~= window or work.instance_id ~= instance_id
+		or not handover_enabled or approved_handover ~= work.approval then handover_work = nil; return false end
+	local loaded, connection = pcall(refresh_connection)
+	if not loaded then
+		if handover_work == work then
+			handover_work = nil
+			handover_error = true
+			show_error(cx, tostring(connection))
+		end
+		return false
+	end
+	if handover_work ~= work then return false end
+	if active_storage ~= work.storage or not same_connection(connection, work.connection)
+		or local_identity == nil or not local_identity.available or local_identity.host ~= work.host
+		or local_identity.observation_generation ~= work.observation_generation
+		or native_generations[work.host] ~= work.native_generation then
+		handover_work = nil
+		return false
+	end
+	return true
+end
+
+local function handover_process(command, body, work, cx, ready)
+	if not current_handover(work, cx) then return end
+	work.phase = command
+	local function fail(message, fresh_cx)
+		handover_work = nil
+		handover_error = true
+		show_error(fresh_cx, "native consumer handover unavailable: " .. tostring(message))
+	end
+	local started, message = pcall(function()
+		local connection = work.connection
+		tern.process.run({ connection.executable, command, "--config-dir", connection.config_dir, "--state-dir", connection.state_dir }, {
+			timeout_ms = SETUP_TIMEOUT_MS, stdin = tern.json.encode(body),
+			env = { DESKTOP_PET_CONFIG_DIR = connection.config_dir, DESKTOP_PET_STATE_DIR = connection.state_dir },
+		}):next(function(result, err, fresh_cx)
+			if work.phase ~= command or not current_handover(work, fresh_cx) then return end
+			work.phase = "response"
+			local ok, failure = pcall(function()
+				if err ~= nil then error(tostring(err)) end
+				if type(result) ~= "table" or result.timed_out then error("consumer handover query timed out") end
+				if result.status ~= 0 then error("consumer handover query failed: " .. tostring(result.stderr):sub(1, 240)) end
+				if type(result.stdout) ~= "string" or #result.stdout > SETUP_RESPONSE_BYTES then error("invalid consumer handover response size") end
+				ready(tern.json.decode(result.stdout), fresh_cx)
+			end)
+			if not ok and current_handover(work, fresh_cx) then fail(failure, fresh_cx) end
+		end)
+	end)
+	if not started and current_handover(work, cx) then fail(message, cx) end
+end
+
+local function probe_handover(data, connection, cx)
+	local approval = approved_handover
+	if not handover_enabled or approval == nil or handover_work ~= nil or data.instance_id == nil or data.instance_id ~= instance_id
+		or #data.reports ~= 0 or local_identity == nil or not local_identity.available
+		or data.local_generation == nil or data.local_generation < 1 then return end
+	if approval.authority.target_instance_id ~= instance_id then
+		approved_handover = nil
+		route_repair_required = true
+		handover_error = true
+		show_error(cx, "native consumer handover target instance changed; waiting for current approved proof")
+		return
+	end
+	local now = tern.now()
+	if now < handover_probe_at then return end
+	handover_probe_at = now + INTERVAL_MS
+	if type(window) ~= "string" or window == "" or #window > 256 then error("invalid consumer handover source window") end
+	if not same_connection(settings(), approval.target) then error("saved SDK route changed before consumer handover") end
+	local canonical = tern.kv.get("connection")
+	local work = { incarnation = incarnation, window = window, instance_id = instance_id, storage = active_storage,
+		connection = connection, host = data.local_host, observation_generation = data.local_observation_generation,
+		native_generation = data.local_generation, approval = approval }
+	handover_work = work
+	if canonical == nil then
+		local saved = save_connection(approval.target, approval.target, cx,
+			function(fresh_cx) return current_handover(work, fresh_cx) end, true, approval)
+		if not saved and handover_work == work then
+			handover_work = nil
+			handover_error = true
+			error("could not canonicalize the approved saved SDK route")
+		end
+		return
+	end
+	handover_process("migration-integration-handover", {
+		version = 1, kind = "migration-integration-handover", handover = approval.authority,
+		original = approval.original, target = approval.target, window_id = work.window, loaded_protocol = 1,
+	}, work, cx, function(receipt, receipt_cx)
+		if type(receipt) ~= "table" or receipt.version ~= 1 or receipt.kind ~= "migration-integration-handover"
+			or receipt.confirmed ~= true or receipt.window_id ~= work.window or receipt.target_instance_id ~= work.instance_id then
+			error("native did not confirm the actual consumer handover")
+		end
+		for key in pairs(receipt) do
+			if key ~= "version" and key ~= "kind" and key ~= "confirmed" and key ~= "window_id" and key ~= "target_instance_id" then
+				error("unknown native consumer handover receipt field")
+			end
+		end
+		handover_work = nil
+		approved_handover = nil
+		handover_route_at = tern.now() + HANDOVER_INTERVAL_MS
+		handover_error = false
+		show_connected(receipt_cx)
+	end)
+end
+
 exchange = function(cx)
 	if cx == nil then
 		return
@@ -905,6 +1063,7 @@ exchange = function(cx)
 					and data.instance_id ~= nil and response.instance_id ~= data.instance_id then
 					-- A daemon restart invalidates reports and all old source identities.
 					reset_identity()
+					if neutral_executable(connection.executable) then route_repair_required = true end
 					show_error(response_cx, "desktop pet restarted; pending replies have unknown delivery")
 					return
 				end
@@ -914,6 +1073,9 @@ exchange = function(cx)
 						-- Do not replay an uncertain ask. A fresh result-free source registers
 						-- on the next ordinary full-snapshot poll.
 						reset_identity()
+						if response.error_code == "instance_changed" and neutral_executable(connection.executable) then
+							route_repair_required = true
+						end
 						show_error(response_cx, "desktop pet source must reconnect; pending replies have unknown delivery")
 						return
 					elseif response.error_code == "receipt_rejected" and data.instance_id ~= nil
@@ -956,7 +1118,8 @@ exchange = function(cx)
 					results_identity = nil
 				end
 				if scoped_error ~= nil then show_error(response_cx, scoped_error)
-				else show_connected(response_cx) end
+				elseif not handover_error and handover_work == nil then show_connected(response_cx) end
+				if local_error == nil then probe_handover(data, connection, response_cx) end
 				local command = response.command
 				if command ~= nil and command ~= NULL then
 					if local_error ~= nil or local_reply.generation == 0 then
@@ -968,6 +1131,7 @@ exchange = function(cx)
 			if not succeeded then
 				if data.incarnation == incarnation and active_exchange == data then
 					finish_exchange(data)
+					if neutral_executable(connection.executable) then route_repair_required = true end
 					show_error(response_cx, tostring(pending))
 				end
 			elseif not pending then
@@ -982,13 +1146,22 @@ local function setup_guard(cx)
 	setup_pending = nil
 	local serial, source = setup_serial, incarnation
 	local captured, storage = pcall(stored_identity)
-	if not captured then show_error(cx, tostring(storage)); return nil end
+	if not captured then
+		automatic_reconnect = true
+		show_error(cx, tostring(storage))
+		return nil
+	end
 	setup_pending = serial
 	return function(fresh_cx)
 		if serial ~= setup_serial or source ~= incarnation then return false end
 		if fresh_cx == nil then setup_pending = nil; return false end
 		local checked, now = pcall(stored_identity)
-		if not checked then setup_pending = nil; show_error(fresh_cx, tostring(now)); return false end
+		if not checked then
+			setup_pending = nil
+			automatic_reconnect = true
+			show_error(fresh_cx, tostring(now))
+			return false
+		end
 		if now ~= storage then
 			-- Another window won. Fence prompts, discovery and offered commands.
 			pcall(refresh_connection)
@@ -1000,17 +1173,32 @@ local function setup_guard(cx)
 	end, storage
 end
 
-local function save_connection(candidate, validated, cx, current)
+save_connection = function(candidate, validated, cx, current, supports_handover, handover)
+	local expected = tern.json.encode({ connection = candidate })
 	if not current(cx) then return end
 	local saved, message = pcall(tern.kv.set, "connection", candidate)
 	setup_pending = nil
 	if not saved then show_error(cx, "could not save desktop pet connection: " .. tostring(message)); return end
-	-- One atomic save is the cutover. Retire all old work and uncertain reports.
+	-- The SDK has atomic replacement, not transactional compare-and-set.
+	-- Fence old work once saved; do not activate a superseded or unreadable save.
 	reset_identity()
 	setup_serial += 1
-	active_connection = validated
+	active_connection, active_storage = nil, nil
+	automatic_reconnect = true
+	local checked, storage = pcall(stored_identity)
+	if not checked then
+		show_error(cx, "connection saved, but could not verify current settings: " .. tostring(storage))
+		return
+	end
+	if storage ~= expected then
+		show_error(cx, "connection changed in another window; validating its saved route before reconnecting")
+		return
+	end
+	active_connection, active_storage = validated, storage
+	handover_enabled = supports_handover == true
+	approved_handover = handover
 	cleanup_legacy()
-	active_storage = tern.json.encode({ connection = candidate })
+	route_repair_required = false
 	automatic_reconnect = false
 	exchange(cx)
 	return true
@@ -1023,20 +1211,36 @@ local function connect(cx)
 	if current == nil then return end
 	local loaded, connection = pcall(settings)
 	if not loaded then setup_pending = nil; show_error(cx, tostring(connection) .. "\n" .. INSTALL_ADVICE); return end
-	if connection ~= nil and legacy_executable(connection.executable) then
-		resolve_migration(connection, cx, current, function(target, fresh_cx)
-			save_connection(target, target, fresh_cx, current)
-		end)
-		return
-	end
 	if active_connection ~= nil and active_storage == storage then setup_pending = nil; exchange(cx); return end
-	resolve_connection(connection and connection.executable or nil, connection, cx, current, function(validated, fresh_cx)
+	local function activate(validated, fresh_cx, supports_handover, handover)
+		if not current(fresh_cx) then return end
 		setup_pending = nil
 		reset_identity()
 		active_connection, active_storage = validated, storage
+		handover_enabled = supports_handover == true
+		approved_handover = handover
 		automatic_reconnect = false
+		route_repair_required = false
 		exchange(fresh_cx)
-	end)
+	end
+	local function approved(target, fresh_cx, supports_handover, handover)
+		if same_connection(target, connection) then activate(target, fresh_cx, supports_handover, handover)
+		else save_connection(target, target, fresh_cx, current, supports_handover, handover) end
+	end
+	if connection ~= nil and legacy_executable(connection.executable) then
+		resolve_migration(connection, cx, current, approved)
+	elseif connection ~= nil and neutral_executable(connection.executable) then
+		-- Locate authenticated current-owner proof before invoking a potentially
+		-- retired canonical keg. No proof means validate ONLY the saved route.
+		resolve_migration(connection, cx, current, approved, function(proof_failure, proof_cx)
+			resolve_connection(connection.executable, connection, proof_cx, current, activate, function(failure, failure_cx)
+				route_repair_required = true
+				show_error(failure_cx, failure .. "\nMigration proof unavailable: " .. proof_failure .. "\n" .. INSTALL_ADVICE)
+			end)
+		end)
+	else
+		resolve_connection(connection and connection.executable or nil, connection, cx, current, activate)
+	end
 end
 
 local function configure(cx)
@@ -1062,8 +1266,8 @@ local function configure(cx)
 			executable_cx:prompt({ value = proposal.config_dir, placeholder = "Absolute desktop pet config directory" }):next(continuation(function(new_config, config_cx)
 				config_cx:prompt({ value = proposal.state_dir, placeholder = "Absolute desktop pet state directory" }):next(continuation(function(new_state, state_cx)
 					local candidate = validate_connection({ version = 1, executable = new_executable, config_dir = new_config, state_dir = new_state })
-					resolve_connection(candidate.executable, candidate, state_cx, current, function(validated, save_cx)
-						if save_connection(candidate, validated, save_cx, current) then
+					resolve_connection(candidate.executable, candidate, state_cx, current, function(validated, save_cx, supports_handover)
+						if save_connection(candidate, validated, save_cx, current, supports_handover) then
 							save_cx:toast("info", "Desktop pet connection saved")
 						end
 					end)
@@ -1080,11 +1284,47 @@ local function configure(cx)
 	end
 end
 
+local function repair_saved_route(cx, quiet)
+	local current = setup_guard(cx)
+	if current == nil then return end
+	local loaded, connection = pcall(settings)
+	if not loaded then setup_pending = nil; show_error(cx, tostring(connection)); return end
+	if connection == nil or not neutral_executable(connection.executable) then
+		setup_pending = nil
+		route_repair_required = false
+		return
+	end
+	local failed = quiet and function(message)
+		tern.log.warn("Desktop pet: approved consumer handover not yet available: " .. tostring(message))
+	end or nil
+	resolve_migration(connection, cx, current, function(target, fresh_cx, supports_handover, handover)
+		if same_connection(target, connection) then
+			setup_pending = nil
+			handover_enabled = supports_handover == true
+			approved_handover = handover
+			route_repair_required = false
+		else
+			save_connection(target, target, fresh_cx, current, supports_handover, handover)
+		end
+	end, failed)
+end
+
 local function tick(cx)
 	timer = tern.timer(INTERVAL_MS, tick)
 	if active_connection ~= nil then
 		local loaded, message = pcall(refresh_connection)
-		if loaded then exchange(cx); return end
+		if loaded then
+			if setup_pending == nil then
+				if route_repair_required then repair_saved_route(cx)
+				elseif handover_enabled and approved_handover == nil and handover_work == nil
+					and neutral_executable(active_connection.executable) and tern.now() >= handover_route_at then
+					handover_route_at = tern.now() + HANDOVER_INTERVAL_MS
+					repair_saved_route(cx, true)
+				end
+			end
+			exchange(cx)
+			return
+		end
 		if active_connection ~= nil then show_error(cx, tostring(message)); return end
 	end
 	if setup_pending ~= nil then return end
@@ -1095,12 +1335,16 @@ local function tick(cx)
 	end
 	local loaded, connection = pcall(settings)
 	if not loaded then show_error(cx, tostring(connection)); return end
-	if connection ~= nil and legacy_executable(connection.executable) then connect(cx) end
+	if connection ~= nil and legacy_executable(connection.executable) then connect(cx)
+	elseif route_repair_required then repair_saved_route(cx) end
 end
 
--- Repeating discovery is limited to legacy routes awaiting committed native
--- approval. Saved-route changes validate the exact replacement before polling.
-tern.on("window_start", connect)
+-- Startup events and reload's timer share one setup chain. Repeating discovery
+-- is limited to non-overlapping, bounded approved-route repair attempts.
+local function start_connection(cx)
+	if setup_pending == nil and active_connection == nil then connect(cx) end
+end
+tern.on("window_start", start_connection)
 for _, event in ipairs({ "pane_created", "pane_closed", "tab_created", "tab_closed",
 	"command_started", "command_finished", "cwd", "title" }) do
 	tern.on(event, function(_event, cx)
@@ -1111,5 +1355,5 @@ tern.command({ id = "connect", title = "Connect to desktop pet", run = connect }
 tern.command({ id = "configure", title = "Configure desktop pet connection", run = configure })
 timer = tern.timer(1, function(cx)
 	timer = tern.timer(INTERVAL_MS, tick)
-	connect(cx)
+	start_connection(cx)
 end)
