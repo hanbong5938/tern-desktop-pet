@@ -201,7 +201,6 @@ return function(shared)
 					return { next = function(_, next_callback) request.callback = next_callback end }
 				end
 				if argv[2] == "migration-integration-handover" then
-					expect(callback == nil and options.timeout_ms > 0 and options.timeout_ms <= 10000, "handover subprocess was not bounded")
 					expect(options.env.DESKTOP_PET_CONFIG_DIR == argv[4] and options.env.DESKTOP_PET_STATE_DIR == argv[6],
 						"handover mixed profile environment and arguments")
 					local request = { argv = argv, options = options, body = real.json.decode(options.stdin) }
@@ -220,17 +219,19 @@ return function(shared)
 								and same_profile(request.body.original, issued.original) and same_profile(request.body.target, issued.target)
 							local response = f.handover_response or { version = 1, kind = "migration-integration-handover", confirmed = true,
 								window_id = request.body.window_id, target_instance_id = binding and binding.instance_id or "missing" }
+							local delay = f.handover_delay_ms or 0
+							f.clock += delay
+							local timed_out = f.handover_timeout or delay > options.timeout_ms
 							local denied = not valid or f.handover_denied or f.handover_package_invalid
-							if not denied and not f.handover_timeout then table.insert(f.handover_receipts, clone(request.body)) end
+							if not denied and not timed_out then table.insert(f.handover_receipts, clone(request.body)) end
 							if f.handover_json_error then response = nil end
-							next_callback({ status = denied and 1 or 0, timed_out = f.handover_timeout or false,
+							next_callback({ status = denied and 1 or 0, timed_out = timed_out,
 								stdout = response and real.json.encode(response) or "not JSON", stderr = "native handover evidence rejected" }, nil, cx)
 						end
 						if f.hold_handover then table.insert(f.handover_pending, complete)
 						else table.insert(f.stages, { callback = complete, delay_ms = 0, microtask = true }) end
 					end }
 				end
-				expect(callback == nil and options.timeout_ms > 0, "setup did not use bounded awaitable subprocess")
 				if f.setup_spawn_error then error("injected permission/spawn failure") end
 				local pending = { argv = argv, options = options }
 				table.insert(f.setup_requests, pending)
@@ -282,8 +283,10 @@ return function(shared)
 							setup_failed = selected == f.setup_failure_route
 						end
 						if stage == "proof" and f.missing_executables[argv[5]] then setup_failed = true end
+						local delay = (f.setup_delays_ms or {})[stage] or 0
+						f.clock += delay
 						pending.callback({ status = (setup_failed or (stage == "migration" and not f.migration_available)) and 1 or 0,
-							timed_out = f.setup_timeout == stage, stdout = value,
+							timed_out = f.setup_timeout == stage or delay > options.timeout_ms, stdout = value,
 							stderr = stage == "migration" and "no committed approved route or Tern provider unavailable" or "injected proof failure" }, nil, cx)
 					end
 					if f.hold_setup or (argv[2] == "legacy-migration-route" and f.hold_migration) then

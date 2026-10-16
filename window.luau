@@ -97,6 +97,8 @@ local function show_connected(cx)
 end
 
 local SETUP_TIMEOUT_MS = 10000
+-- Authority queries verify retained and current signed owners, not just metadata.
+local MIGRATION_AUTHORITY_TIMEOUT_MS = 60000
 local SETUP_RESPONSE_BYTES = 32 * 1024
 local setup_serial = 0
 local setup_pending = nil
@@ -373,7 +375,7 @@ local function resolve_migration(connection, cx, current, ready, failed)
 	resolve_connection(nil, connection, cx, current, function(validated, proof_cx, supports_handover)
 		setup_process({ validated.executable, "legacy-migration-route", "--config-dir", connection.config_dir,
 			"--state-dir", connection.state_dir }, {
-			timeout_ms = SETUP_TIMEOUT_MS,
+			timeout_ms = MIGRATION_AUTHORITY_TIMEOUT_MS,
 			stdin = tern.json.encode({ version = 1, kind = "legacy-migration-route",
 				executable = connection.executable, config_dir = connection.config_dir, state_dir = connection.state_dir }),
 			env = { DESKTOP_PET_CONFIG_DIR = connection.config_dir, DESKTOP_PET_STATE_DIR = connection.state_dir },
@@ -908,7 +910,7 @@ local function handover_process(command, body, work, cx, ready)
 	local started, message = pcall(function()
 		local connection = work.connection
 		tern.process.run({ connection.executable, command, "--config-dir", connection.config_dir, "--state-dir", connection.state_dir }, {
-			timeout_ms = SETUP_TIMEOUT_MS, stdin = tern.json.encode(body),
+			timeout_ms = MIGRATION_AUTHORITY_TIMEOUT_MS, stdin = tern.json.encode(body),
 			env = { DESKTOP_PET_CONFIG_DIR = connection.config_dir, DESKTOP_PET_STATE_DIR = connection.state_dir },
 		}):next(function(result, err, fresh_cx)
 			if work.phase ~= command or not current_handover(work, fresh_cx) then return end

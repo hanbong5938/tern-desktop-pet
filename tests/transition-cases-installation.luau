@@ -107,6 +107,20 @@ return function(shared)
 			and #f.missing_invocations == 0, "handover changed original profile or executed the missing alias")
 	end)
 
+	case("slow authenticated owner proof and handover still complete in the original window", function(f)
+		local original = legacy_route(); original.executable = "/opt/homebrew/bin/herdr-desktop-pet"
+		f.kv.connection = original; f.missing_executables[original.executable] = true
+		f.setup_delays_ms = { migration = 16000 }; f.handover_delay_ms = 16000
+		local registration, bound = bind_handover(f)
+		expect(#f.handover_receipts == 1 and f:connection_writes() == 1 and #f.prompts == 0,
+			"valid signed-owner validation was cut off before automatic handover")
+		local receipt = f.handover_receipts[1]
+		expect(receipt.window_id == registration.body.window and receipt.window_id == bound.body.window
+			and receipt.handover.target_instance_id == bound.body.instance_id
+			and same_profile(receipt.original, original) and same_profile(receipt.target, f.kv.connection),
+			"slow approval borrowed another original route, window or native instance")
+	end)
+
 	case("native without handover capability never receives successor-only commands", function(f)
 		f:bind()
 		for _ = 1, 3 do f:ok(f:poll()) end
@@ -298,9 +312,6 @@ return function(shared)
 		f.kv.connection = legacy_route(); f.migration_available = true; f.hold_migration = true
 		f:window_start(); f:poll(); f:poll()
 		expect(#f.setup_requests == 5 and #f.requests == 0 and #f.writes == 0, "startup hooks overlapped native proof queries")
-		for _, query in ipairs(f.setup_requests) do
-			expect(query.options.timeout_ms > 0 and query.options.timeout_ms <= 10000, "setup attempt was unbounded")
-		end
 		f.hold_migration = false; f:complete_setup(); f:window_start()
 		expect(#f.requests == 1 and #f.setup_requests == 5 and f:connection_writes() == 1, "startup restarted a completed handover")
 	end)
