@@ -67,6 +67,8 @@ Tern 관찰이 활성화되면 플러그인은 창의 `hosts`, `panes`, `tabs`, 
 
 **Adapter 추출 의미 보존:** `native-adapter`가 최초 손실 시계와 `TernIntegration::tick`의 보존 정리를 소유하며 공통 domain은 `remove_offline_source`로 정확한 offline generation을 재확인합니다. 교환은 신선도만 만료시키고 보존 정리는 수행하지 않습니다. 성공한 helper 응답은 바인딩된 daemon instance와 일치해야 하며 영수증으로 새 parent epoch를 만들 수 없습니다. 요청 크기는 디코딩 전 실제 JSON으로 검사하고 생략된 선택 필드를 정규화된 `null`로 다시 계산하지 않습니다. 이 의미 조정은 native-adapter 회귀를 추가하지만 해당 검사는 이번 소스 조정에서 실행하지 않았습니다. 아래 원본 native 근거는 수정된 adapter의 검증 결과가 아닙니다.
 
+**복구와 원본 프레임:** 봉투/영수증 검증과 만료 처리 뒤, 자식 용량 접수가 만료 처리에 재진입하기 전에 복구 중인 parent의 신선도를 갱신합니다. 새 원격 형제가 공통 소스 한도에 걸려도 복구된 로컬 자식은 연결을 유지하며 sequence/영수증 확정은 거래 끝에서 수행합니다. CLI는 typed 요청을 재직렬화하지 않고 접수한 원본 JSON 바이트를 전달합니다. 마지막 LF 한 개와 바로 앞 CR만 제거하고, pretty JSON 내부의 LF 구분자는 빌린 slice 쓰기로 공백으로 바꾼 뒤 같은 deadline 아래 전송 LF 한 개를 붙입니다. 생략 필드·Unicode·JSON escaping의 원래 바이트 예산은 유지합니다. 단독 CR은 JSON 공백이며 크기 한도에 포함합니다. Adapter handler는 공통 preference 포트를 받지만 읽거나 수정하지 않습니다. 재진입 용량 복구와 실제 CLI/비공개 소켓/등록 handler 경로의 회귀를 추가했으며 이 소스 편집 단계에서 새 검사는 실행하지 않았습니다.
+
 **보존 검증 범위:** main native **760 통과/1 ignored**, 실제 AppKit composer·네이티브 IME callback·렌더 이미지 검사, coordinator **73**, Bun **59**, 실제 Tern VM 통제 경계 Luau **132/132**가 통과했습니다. populated 주입 v2 IPC는 새 등록 없이 **1 live/63 Offline → 1 live/0 Offline**으로 정리되었습니다. 별도 실제 SDK 소유 in-process loopback의 빈 호스트 관측 bridge는 **2 connected/0 Offline → stalled 1 connected/1 Offline → 정리 1 connected/0 Offline → 복구 2 connected/0 Offline**을 보였고 로컬 generation은 유지했습니다. 설치된 프로덕션 플러그인 연결·외부 실제 원격 에이전트·네트워크 장애·semantic ask/모델 전달 증거가 아닙니다. 중립 설치의 API 1/protocol 4 요구와 native checkout의 protocol 3/API 없음 차단은 그대로입니다. 사용자가 승인한 권한 없는 AppKit·소스 앱 IPC·선택/커서 검사는 실제 카드 클릭 자동화·물리 IME 인증을 주장하지 않으며 이전 0.1.0/v0.3.6 근거는 그대로입니다.
 
 

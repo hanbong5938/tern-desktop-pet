@@ -30,7 +30,7 @@ impl ControlExtension for EvidenceHandler {
     fn kind(&self) -> &'static str { "tern-migration-evidence" }
     fn max_request_bytes(&self) -> usize { LIMIT }
     fn max_response_bytes(&self) -> usize { LIMIT }
-    fn handle_frame(&self, frame: &[u8]) -> Result<Vec<u8>, String> {
+    fn handle_frame(&self, frame: &[u8], _preferences: &dyn desktop_pet_contracts::PreferenceAccess) -> Result<Vec<u8>, String> {
         if frame.len() > LIMIT { return Err("Tern migration evidence request exceeds limit".into()); }
         crate::transport::reject_duplicate_json_keys(frame)?;
         let request: Request = serde_json::from_slice(frame).map_err(|error| error.to_string())?;

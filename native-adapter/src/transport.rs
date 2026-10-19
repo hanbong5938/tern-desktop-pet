@@ -1,6 +1,6 @@
 use crate::protocol::*;
 use desktop_pet_contracts::{CliExtension, CliInvocation, CliOption, CliOutput};
-use serde::{Deserialize, Deserializer};
+use serde::Deserializer;
 use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use std::collections::HashSet;
 use std::ffi::OsStr;
@@ -14,11 +14,15 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-pub fn decode_exchange_request(frame: &[u8]) -> Result<TernExchangeRequest, String> {
-    let frame = match frame.strip_suffix(b"\n") {
+fn exchange_json_bytes(frame: &[u8]) -> &[u8] {
+    match frame.strip_suffix(b"\n") {
         Some(frame) => frame.strip_suffix(b"\r").unwrap_or(frame),
         None => frame,
-    };
+    }
+}
+
+pub fn decode_exchange_request(frame: &[u8]) -> Result<TernExchangeRequest, String> {
+    let frame = exchange_json_bytes(frame);
     if frame.len() > MAX_EXCHANGE_BYTES { return Err("Tern exchange request JSON exceeds 256 KiB".into()); }
     reject_duplicate_json_keys(frame).map_err(|error| format!("invalid Tern exchange: {error}"))?;
     serde_json::from_slice(frame).map_err(|error| format!("invalid Tern exchange: {error}"))
@@ -28,9 +32,7 @@ pub fn send_exchange(socket_path: &Path, frame: &[u8], timeout: Duration) -> Res
     // Parse/size-check before connection, then forward the selected profile only.
     let request = decode_exchange_request(frame)?;
     if socket_path.as_os_str().is_empty() { return Err("control socket path is empty".into()); }
-    let mut bytes = serde_json::to_vec(&request).map_err(|error| format!("cannot encode Tern exchange: {error}"))?;
-    if bytes.len() > MAX_EXCHANGE_BYTES { return Err("Tern exchange request JSON exceeds 256 KiB".into()); }
-    bytes.push(b'\n');
+    let payload = exchange_json_bytes(frame);
     let deadline = Instant::now() + timeout;
     if let Ok(metadata) = fs::symlink_metadata(socket_path) {
         if metadata.file_type().is_symlink() || !metadata.file_type().is_socket()
@@ -40,7 +42,22 @@ pub fn send_exchange(socket_path: &Path, frame: &[u8], timeout: Duration) -> Res
         }
     }
     let mut stream = connect(socket_path, deadline).map_err(|error| format!("cannot connect to control socket {}: {error}", socket_path.display()))?;
-    write_frame(&mut stream, &bytes, deadline).map_err(|error| format!("cannot send Tern exchange: {error}"))?;
+    // Valid JSON cannot contain raw LF inside a string. Fold pretty-print
+    // separators into spaces so the original JSON remains one transport frame,
+    // without reserializing defaults/escaping or allocating a payload copy.
+    let send = (|| -> io::Result<()> {
+        let mut start = 0;
+        for (index, byte) in payload.iter().enumerate() {
+            if *byte == b'\n' {
+                write_frame(&mut stream, &payload[start..index], deadline)?;
+                write_frame(&mut stream, b" ", deadline)?;
+                start = index + 1;
+            }
+        }
+        write_frame(&mut stream, &payload[start..], deadline)?;
+        write_frame(&mut stream, b"\n", deadline)
+    })();
+    send.map_err(|error| format!("cannot send Tern exchange: {error}"))?;
     let frame = read_frame(&mut stream, deadline).map_err(|error| format!("cannot read Tern exchange: {error}"))?;
     reject_duplicate_json_keys(&frame).map_err(|error| format!("invalid Tern exchange response: {error}"))?;
     let reply: TernExchangeReply = serde_json::from_slice(&frame).map_err(|error| format!("invalid Tern exchange response: {error}"))?;

@@ -8,6 +8,12 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 
+struct UnusedPreferences;
+impl PreferenceAccess for UnusedPreferences {
+    fn read(&self) -> Result<serde_json::Map<String, Value>, String> { panic!("Tern must not read preferences") }
+    fn apply(&self, _patch: serde_json::Map<String, Value>) -> Result<PreferenceCommit, String> { panic!("Tern must not write preferences") }
+}
+
 struct Source {
     descriptor: SourceDescriptor,
     generation: u64,
@@ -122,7 +128,7 @@ impl Fixture {
         Self { runtime, integration }
     }
     fn exchange(&self, request: &TernExchangeRequest) -> TernExchangeReply {
-        let bytes = self.integration.exchange_handler().handle_frame(&serde_json::to_vec(request).unwrap()).unwrap();
+        let bytes = self.integration.exchange_handler().handle_frame(&serde_json::to_vec(request).unwrap(), &UnusedPreferences).unwrap();
         serde_json::from_slice(&bytes).unwrap()
     }
     fn exchange_at(&self, request: &TernExchangeRequest, now: Instant) -> TernExchangeReply {
@@ -199,7 +205,7 @@ fn request_budget_is_json_only_and_invalid_inventory_never_mutates() {
     assert_eq!(send_exchange(std::path::Path::new("/absent.sock"), &bytes, Duration::from_secs(1)).unwrap_err(), "Tern exchange request JSON exceeds 256 KiB");
     let mut duplicate = request("invalid"); let repeated = duplicate.hosts[0].agents[0].clone(); duplicate.hosts[0].agents.push(repeated);
     assert!(!fixture.exchange(&duplicate).ok);
-    let response: Value = serde_json::from_slice(&fixture.integration.exchange_handler().handle_frame(br#"{"kind":"tern","kind":"tern"}"#).unwrap()).unwrap();
+    let response: Value = serde_json::from_slice(&fixture.integration.exchange_handler().handle_frame(br#"{"kind":"tern","kind":"tern"}"#, &UnusedPreferences).unwrap()).unwrap();
     assert_eq!(response["error_code"], "rejected");
     assert_eq!(fixture.runtime.domain.lock().unwrap().revision, revision);
 }
@@ -592,18 +598,18 @@ fn evidence_requires_actual_confirmed_fresh_reconnect_and_observation_survives_g
     let extensions = fixture.integration.extensions();
     let evidence = extensions.control.iter().find(|extension| extension.kind() == "tern-migration-evidence").unwrap();
     let query = br#"{"version":1,"kind":"tern-migration-evidence","window_id":"reconnect"}"#;
-    assert!(evidence.handle_frame(query).is_err());
+    assert!(evidence.handle_frame(query, &UnusedPreferences).is_err());
     let mut poll = request("reconnect"); fixture.exchange(&poll);
-    assert!(evidence.handle_frame(query).is_err(), "unbound first exchange is not reconnection proof");
+    assert!(evidence.handle_frame(query, &UnusedPreferences).is_err(), "unbound first exchange is not reconnection proof");
     fixture.runtime.domain.lock().unwrap().gated = true;
     poll.instance_id = Some("daemon-a".into()); poll.sequence = 2;
     assert!(fixture.exchange(&poll).ok, "observation remains read-only under migration mutation gate");
     assert!(matches!(fixture.integration.submit_prompt(fixture.key("reconnect"), "blocked".into()), Err(PromptError::Other(_))));
-    let reply: Value = serde_json::from_slice(&evidence.handle_frame(query).unwrap()).unwrap();
+    let reply: Value = serde_json::from_slice(&evidence.handle_frame(query, &UnusedPreferences).unwrap()).unwrap();
     assert_eq!(reply["fresh"], true); assert_eq!(reply["binding_epoch"], 1); assert_eq!(reply["sequence"], 2);
     assert_eq!(reply["observation_generation"], 1); assert_eq!(reply["native_generation"], 1);
     assert_eq!(reply["instance_id"], "daemon-a"); assert_eq!(reply["local_host"], "0");
-    fixture.age("reconnect"); assert!(evidence.handle_frame(query).is_err());
+    fixture.age("reconnect"); assert!(evidence.handle_frame(query, &UnusedPreferences).is_err());
 }
 
 #[test]
@@ -927,9 +933,7 @@ fn repeated_loss_does_not_extend_the_first_valid_offline_deadline() {
     }
 }
 
-#[test]
-fn compact_raw_request_budget_is_not_recounted_with_missing_optional_fields() {
-    let fixture = Fixture::new();
+fn compact_raw_request_at_limit() -> Vec<u8> {
     let mut wire = serde_json::to_value(inventory_with_json_bytes(MAX_EXCHANGE_BYTES)).unwrap();
     let agents = wire["hosts"][0]["agents"].as_array_mut().unwrap();
     for agent in agents {
@@ -949,7 +953,14 @@ fn compact_raw_request_budget_is_not_recounted_with_missing_optional_fields() {
     assert_eq!(frame.len(), MAX_EXCHANGE_BYTES);
     let typed = decode_exchange_request(&frame).unwrap();
     assert!(serde_json::to_vec(&typed).unwrap().len() > MAX_EXCHANGE_BYTES);
-    let reply: TernExchangeReply = serde_json::from_slice(&fixture.integration.exchange_handler().handle_frame(&frame).unwrap()).unwrap();
+    frame
+}
+
+#[test]
+fn compact_raw_request_budget_is_not_recounted_with_missing_optional_fields() {
+    let fixture = Fixture::new();
+    let frame = compact_raw_request_at_limit();
+    let reply: TernExchangeReply = serde_json::from_slice(&fixture.integration.exchange_handler().handle_frame(&frame, &UnusedPreferences).unwrap()).unwrap();
     assert!(reply.ok && reply.hosts[0].error.is_none());
 }
 
@@ -985,4 +996,124 @@ fn grouped_agent_limit_and_normalization_preserve_metadata_per_host() {
     let mut extra = poll.hosts[1].agents[0].clone(); extra.pane = "too-many".into();
     poll.hosts[1].agents.push(extra);
     assert_eq!(poll.normalize().unwrap_err(), "invalid or duplicate Tern host");
+}
+
+#[test]
+fn recovering_parent_survives_reentrant_capacity_expiry() {
+    let fixture = Fixture::new();
+    let base = Instant::now();
+    let mut poll = request("recover-capacity");
+    assert!(fixture.exchange_at(&poll, base).ok);
+    fixture.with_state(|domain, _| {
+        for index in 1..MAX_SOURCES {
+            let source = format!("foreign-{index}");
+            assert!(domain.begin_source(SourceDescriptor {
+                id: source.clone(), provider: "herdr".into(), label: source.clone(),
+                locality: SourceLocality::Local,
+                capabilities: SourceCapabilities { prompt: true, remove_worktree: false },
+            }, 1));
+            domain.sources.get_mut(&source).unwrap().connected = true;
+        }
+    });
+    poll.instance_id = Some("daemon-a".into());
+    poll.sequence = 2;
+    poll.hosts.push(remote_host("1"));
+    let now = base + FRESHNESS;
+    let recovered = fixture.exchange_at(&poll, now);
+    assert!(recovered.ok);
+    assert_eq!(recovered.hosts[0].generation, 2);
+    assert!(recovered.hosts[0].error.is_none());
+    assert!(recovered.hosts[1].error.is_some());
+    fixture.with_state(|domain, state| {
+        let source = &domain.sources[&protocol::source_id("recover-capacity", "0")];
+        assert!(source.connected);
+        assert_eq!(source.generation, 2);
+        assert_eq!(domain.sources.len(), MAX_SOURCES);
+        let parent = state.registry.get("recover-capacity").unwrap();
+        assert_eq!(parent.last_seen, now);
+        assert!(!parent.offline && parent.offline_since.is_none());
+    });
+    poll.sequence = 3;
+    let next = fixture.exchange_at(&poll, now + Duration::from_millis(1));
+    assert!(next.ok && next.hosts[0].error.is_none());
+    assert_eq!(next.hosts[0].generation, 2);
+    assert!(next.hosts[1].error.is_some());
+}
+
+// Run the real CLI sender against the real registered handler/domain. Capture
+// bytes separately so successful decoding cannot conceal normalization.
+fn exchange_over_private_socket(frame: &[u8]) -> (Vec<u8>, TernExchangeReply) {
+    let fixture = Fixture::new();
+    let path = std::env::temp_dir().join(format!("dpt-{}-{}.sock", std::process::id(), NEXT_SOCKET.fetch_add(1, Ordering::Relaxed)));
+    let listener = UnixListener::bind(&path).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let handler = fixture.integration.exchange_handler();
+    let peer = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let mut reader = BufReader::new(&stream);
+        let mut received = Vec::new();
+        reader.read_until(b'\n', &mut received).unwrap();
+        assert_eq!(received.last(), Some(&b'\n'));
+        assert_eq!(received.iter().filter(|byte| **byte == b'\n').count(), 1);
+        assert!(reader.buffer().is_empty());
+        let reply = handler.handle_frame(&received, &UnusedPreferences).unwrap();
+        stream.write_all(&reply).unwrap();
+        received
+    });
+    let profile = ProfilePaths {
+        config_dir: std::env::temp_dir(), state_dir: std::env::temp_dir(), control_socket: path.clone(),
+    };
+    let extensions = fixture.integration.extensions();
+    let cli = extensions.cli.iter().find(|cli| cli.commands().contains(&"tern-exchange")).unwrap();
+    let output = cli.execute(CliInvocation { command: "tern-exchange", arguments: &[], input: frame, profile: &profile }).unwrap();
+    assert_eq!(output.exit_code, 0);
+    let reply: TernExchangeReply = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(reply.ok && reply.hosts.iter().all(|host| host.error.is_none()));
+    let received = peer.join().unwrap();
+    std::fs::remove_file(path).unwrap();
+    fixture.with_state(|domain, _| {
+        assert_eq!(domain.sources.len(), 1);
+        assert!(domain.sources.values().all(|source| source.connected && source.generation == 1));
+    });
+    (received, reply)
+}
+
+#[test]
+fn cli_preserves_raw_limit_and_one_transport_terminator() {
+    let raw = compact_raw_request_at_limit();
+    for suffix in [b"".as_slice(), b"\n".as_slice(), b"\r\n".as_slice()] {
+        let mut frame = raw.clone();
+        frame.extend_from_slice(suffix);
+        let (received, _) = exchange_over_private_socket(&frame);
+        assert_eq!(&received[..received.len() - 1], raw.as_slice());
+        assert_eq!(received.len(), MAX_EXCHANGE_BYTES + 1);
+    }
+    let mut bare_cr = raw.clone();
+    bare_cr.push(b'\r');
+    assert_eq!(send_exchange(std::path::Path::new("/absent.sock"), &bare_cr, Duration::from_secs(1)).unwrap_err(), "Tern exchange request JSON exceeds 256 KiB");
+    let mut oversize = raw;
+    oversize.push(b' ');
+    assert_eq!(send_exchange(std::path::Path::new("/absent.sock"), &oversize, Duration::from_secs(1)).unwrap_err(), "Tern exchange request JSON exceeds 256 KiB");
+}
+
+#[test]
+fn cli_folds_pretty_json_without_changing_escaping_or_omitted_fields() {
+    let mut wire = serde_json::to_value(request("pretty")).unwrap();
+    wire["hosts"][0]["agents"][0]["title"] = json!("한글\nescaped newline and \"quotes\"");
+    wire["hosts"][0]["agents"][0].as_object_mut().unwrap().remove("tab_label");
+    for pretty in [false, true] {
+        let raw = if pretty { serde_json::to_vec_pretty(&wire).unwrap() } else { serde_json::to_vec(&wire).unwrap() };
+        for suffix in [b"".as_slice(), b"\n".as_slice(), b"\r\n".as_slice(), b"\r".as_slice()] {
+            let mut frame = raw.clone();
+            frame.extend_from_slice(suffix);
+            let (received, _) = exchange_over_private_socket(&frame);
+            let mut expected = raw.clone();
+            for byte in &mut expected { if *byte == b'\n' { *byte = b' '; } }
+            if suffix == b"\r" { expected.push(b'\r'); }
+            expected.push(b'\n');
+            assert_eq!(received, expected);
+            assert_eq!(serde_json::from_slice::<Value>(&received).unwrap(), wire);
+        }
+    }
 }
