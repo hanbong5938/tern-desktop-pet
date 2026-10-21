@@ -10,6 +10,12 @@
 
 **공개/검증 상태:** 플러그인 **0.2.1**, Core **0.4.9**, bridge **0.3.13**은 아직 공개·적격 검증하지 않은 후속 후보입니다. 이전의 **adapter 41개 / 통제 경계 150개 사례** 결과는 구형 Tern revision `1b3798871131da5f88a705440f9f0cfb8f905fa0`에만 해당하며 이후 경로/cold-load 수정이나 실제 재연결을 검증하지 않습니다. 이전 독립 [Desktop Pet v0.4.1](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.1)의 공개·네이티브 준비 및 **Tern 0.8.3 통제 경계 132/132 / adapter 38개** 관측은 과거의 제한된 증거이지 현재 바이트의 적격 검증이 아닙니다. 최종 불변 소스/산출물 revision에서 지원되는 실제 창의 cold load, 인증된 네이티브 경로 전환과 현재 instance의 신선한 binding을 검증해야 합니다. 문제 컴퓨터의 구형 실행 파일 없음은 네트워크·계정·Keychain 실패의 증거가 아니며 별도 toolsMac의 `load` 50 ms 실패도 그 컴퓨터의 원인을 입증하지 않습니다. 아래 0.1.0/Herdr 네이티브 관측은 과거 증거로만 보존합니다.
 
+### Core beta.6 adapter 호환 소스 통합
+
+호환 소스 브랜치는 `work/authority-deadline-021` (`7276c1b658a1728883d90207119df31bce118170`)과 `main`의 freshness/raw-framing 수정 (`0699207351fed1bb354cb38324c6d8e531e3a80d`)을 합칩니다. authority 브랜치의 `plugin.toml`·`window.luau`·라이선스 바이트를 그대로 보존하며 native evidence regression 호출 전체를 소비자 소유 `PreferenceAccess` 계약에 맞췄습니다. 합쳐진 Core beta.6 workspace의 contracts override를 사용해 native adapter regression 44개가 통과했으며 Core 배포에는 로컬 path 의존성을 남기지 않습니다.
+
+Core 검증용 불변 소스 의존성이지 새 Tern 플러그인 릴리스나 사용자 설치가 아닙니다. 기존 소스 커밋은 보존합니다. 새 지원 창 cold load·로그인한 실제 재연결·SDK KV 변경·물리 GUI 수락은 검증했다고 주장하지 않습니다.
+
 ### 새 설치·수동 설정: 네이티브 앱은 별도로 설치·시작
 
 **새 설치·수동 설정**에서는 공개 앱을 별도로 `brew install hanbong5938/tap/desktop-pet`으로 설치하거나 명시적으로 검증한 core 소스 빌드를 사용하세요. 구형 포뮬러는 새 제품의 별칭이 아닙니다. 네이티브를 직접 시작한 후 실제 실행 파일과 두 프로필 경로를 **Configure desktop pet connection → Connect to desktop pet**에서 선택하세요. 아래의 승인된 자동 업데이트는 Configure·Resume·추가 동의 질문이 **필요하지 않습니다**. 이 플러그인 설치로 네이티브 앱을 설치하거나 시작하지 않습니다. 로컬 core 개발 예시:
@@ -80,6 +86,8 @@ Tern 관찰이 활성화되면 플러그인은 창의 `hosts`, `panes`, `tabs`, 
 **일치하는 네이티브 소스: 신선도 5초 + Offline 보존 30초.** 현재 네이티브 구현은 Tern Offline 행을 단조 시계 기준 30초 유예 뒤 기존 100 ms 유지보수에서 새 등록 없이 소스·행·집계·registry child와 함께 제거합니다. 자연 만료의 유예 시작은 `last_seen + 5s`, 명시적 손실(단절/unavailable·완전한 목록에서 누락·관찰 epoch 전환)은 최초 유효 관측 시점입니다. 반복 손실·다른 호스트 heartbeat는 유예를 늘리지 않고 정리 전 일관된 복구는 해제합니다. live Tern·정상 available 빈 호스트·Herdr는 TTL 정리하지 않습니다. 원격 child 정리는 살아 있는 parent의 binding·로컬 상태를 보존하며 죽은 빈 parent는 결국 정리되고 이전 binding 요청은 `SourceRetired`가 됩니다. generation/revision 경계와 ID 비재사용으로 오래된 키 거절을 유지하고 ask는 최초 손실 때 확정하며 재전송하지 않습니다. 기존 64-source 용량 회수는 더 일찍 가능하고 high-water 메타데이터는 남으므로 전체 과거 메모리 상한이나 정확한 벽시계 마감을 뜻하지 않습니다. 이 소스 전용 네이티브 변경은 **플러그인 RPC·타이머·식별자를 바꾸지 않으며**, 공개 중립 번들에 포함되었다고 주장하거나 네이티브 설치 정책을 완화하지 않습니다.
 
 **Adapter 추출 의미 보존:** `native-adapter`가 최초 손실 시계와 `TernIntegration::tick`의 보존 정리를 소유하며 공통 domain은 `remove_offline_source`로 정확한 offline generation을 재확인합니다. 교환은 신선도만 만료시키고 보존 정리는 수행하지 않습니다. 성공한 helper 응답은 바인딩된 daemon instance와 일치해야 하며 영수증으로 새 parent epoch를 만들 수 없습니다. 요청 크기는 디코딩 전 실제 JSON으로 검사하고 생략된 선택 필드를 정규화된 `null`로 다시 계산하지 않습니다. 현재 adapter의 두 suite에서 **41개 테스트가 통과**했습니다. 아래 원본 native 근거는 이 adapter 결과와 별개입니다.
+
+**복구와 원본 프레임:** 봉투/영수증 검증과 만료 처리 뒤, 자식 용량 접수가 만료 처리에 재진입하기 전에 복구 중인 parent의 신선도를 갱신합니다. 새 원격 형제가 공통 소스 한도에 걸려도 복구된 로컬 자식은 연결을 유지하며 sequence/영수증 확정은 거래 끝에서 수행합니다. CLI는 typed 요청을 재직렬화하지 않고 접수한 원본 JSON 바이트를 전달합니다. 마지막 LF 한 개와 바로 앞 CR만 제거하고, pretty JSON 내부의 LF 구분자는 빌린 slice 쓰기로 공백으로 바꾼 뒤 같은 deadline 아래 전송 LF 한 개를 붙입니다. 생략 필드·Unicode·JSON escaping의 원래 바이트 예산은 유지합니다. 단독 CR은 JSON 공백이며 크기 한도에 포함합니다. Adapter handler는 공통 preference 포트를 받지만 읽거나 수정하지 않습니다. 재진입 용량 복구와 실제 CLI/비공개 소켓/등록 handler 경로의 회귀를 추가했으며 이 소스 편집 단계에서 새 검사는 실행하지 않았습니다.
 
 **보존 검증 범위:** main native **760 통과/1 ignored**, 실제 AppKit composer·네이티브 IME callback·렌더 이미지 검사, coordinator **73**, Bun **59**, 실제 Tern VM 통제 경계 Luau **132/132**가 통과했습니다. populated 주입 v2 IPC는 새 등록 없이 **1 live/63 Offline → 1 live/0 Offline**으로 정리되었습니다. 별도 실제 SDK 소유 in-process loopback의 빈 호스트 관측 bridge는 **2 connected/0 Offline → stalled 1 connected/1 Offline → 정리 1 connected/0 Offline → 복구 2 connected/0 Offline**을 보였고 로컬 generation은 유지했습니다. 설치된 프로덕션 플러그인 연결·외부 실제 원격 에이전트·네트워크 장애·semantic ask/모델 전달 증거가 아닙니다. 중립 설치의 API 1/protocol 4 요구와 native checkout의 protocol 3/API 없음 차단은 그대로입니다. 사용자가 승인한 권한 없는 AppKit·소스 앱 IPC·선택/커서 검사는 실제 카드 클릭 자동화·물리 IME 인증을 주장하지 않으며 이전 0.1.0/v0.3.6 근거는 그대로입니다.
 

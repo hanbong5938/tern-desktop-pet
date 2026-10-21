@@ -180,7 +180,7 @@ impl ControlExtension for ExchangeHandler {
     fn kind(&self) -> &'static str { "tern" }
     fn max_request_bytes(&self) -> usize { MAX_EXCHANGE_BYTES + 2 }
     fn max_response_bytes(&self) -> usize { MAX_RESPONSE_BYTES }
-    fn handle_frame(&self, frame: &[u8]) -> Result<Vec<u8>, String> {
+    fn handle_frame(&self, frame: &[u8], _preferences: &dyn PreferenceAccess) -> Result<Vec<u8>, String> {
         let reply = match decode_exchange_request(frame) {
             Ok(request) => self.integration.exchange(request)?,
             Err(error) => {
@@ -259,6 +259,12 @@ fn exchange_transaction<'a>(integration: &'a TernIntegration, domain: &mut dyn D
         }
         registry.insert(request.window.clone(), next);
     }
+    // Capacity admission releases this registry and may reenter expiry. Mark
+    // the validated parent recovered before any child publication can do so.
+    let window = registry.get_mut(&request.window).expect("registered parent");
+    window.last_seen = now;
+    window.offline = false;
+    window.offline_since = None;
     let omitted: Vec<_> = registry.get(&request.window).expect("registered parent").observations.keys()
         .filter(|id| !request.hosts.iter().any(|host| &host.host == *id)).cloned().collect();
     for id in omitted { lose_host(domain, registry, &request.window, &id, now); }
@@ -350,9 +356,6 @@ fn exchange_transaction<'a>(integration: &'a TernIntegration, domain: &mut dyn D
     let registry = &mut state.registry;
     let window = registry.get_mut(&request.window).expect("registered parent");
     window.sequence = request.sequence;
-    window.last_seen = now;
-    window.offline = false;
-    window.offline_since = None;
     window.last_host_reply_bytes = host_bytes;
     window.bound = true;
     if request.instance_id.is_some() && request.hosts.iter().any(|inventory| inventory.is_local
