@@ -424,9 +424,9 @@ return function(shared)
 			end
 			local overhead = #encode_fixture(real, response, "measure 64-host escaped overhead") + 1
 			response.command.text ..= string.rep("a", LIMIT - overhead + boundary_delta)
-			local stdout = encode_fixture(real, response, "encode 64-host boundary stdout") .. "\n"
-			expect(#stdout == LIMIT + boundary_delta, "64-host fixture did not hit the actual encoded boundary")
-			f:deliver(offered, {}, { stdout = stdout })
+			local body = encode_fixture(real, response, "encode 64-host boundary HTTP body") .. "\n"
+			expect(#body == LIMIT + boundary_delta, "64-host fixture did not hit the actual encoded boundary")
+			f:deliver(offered, {}, { body = body })
 			expect(#f.asks == (boundary_delta == 0 and 1 or 0) and #f.gets == (boundary_delta == 0 and 1 or 0),
 				"64-host response boundary did not fence semantic delivery exactly")
 			if boundary_delta == 0 then expect(f.asks[1].text == response.command.text, "escaped Unicode prompt was changed") end

@@ -2,13 +2,13 @@
 
 [English](README.md) · **한국어**
 
-## Desktop Pet 소비자 — 플러그인 0.2.2-beta.2
+## Desktop Pet 소비자 — 플러그인 0.2.2-beta.3
 
 이 창 플러그인은 Tern 에이전트 관찰과 의미 기반 질문을 별도로 설치한 호스트 중립 [Desktop Pet](https://github.com/hanbong5938/desktop-pet) 앱에 연결합니다. `native-adapter`는 Tern 연동만 소유하며 앱·UI·캐릭터·업데이터는 공통 저장소에 있습니다. 플러그인은 네이티브 앱을 **다운로드·설치·빌드·자동 시작·중지하지 않습니다**. 플러그인 업데이트/제거로 공용 앱이나 두 프로필 디렉터리를 변경하지 않습니다.
 
 [앱 홈페이지](https://hanbong5938.github.io/desktop-pet/) · [Core 설치·프로필](https://github.com/hanbong5938/desktop-pet/blob/main/docs/development.ko.md) · [현재 앱 사용법](https://github.com/hanbong5938/desktop-pet/blob/main/docs/usage.ko.md) · [Core Wiki](https://github.com/hanbong5938/desktop-pet/wiki) · [기존 설치 이전](https://github.com/hanbong5938/desktop-pet/blob/main/docs/migrations/desktop-pet.md). 링크는 core 소유의 목적지이며 실제 공개 배포·재연결 증거가 아닙니다.
 
-**베타 상태:** 교환 복구·최종 pane/session 전달 검사를 서명된 소유자의 이전 권한 및 Core beta.6 호환 기준 코드와 합친 테스트용 프리릴리스입니다. [Desktop Pet v0.4.17-beta.8](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.17-beta.8)은 이 소비자와 일치하는 네이티브 adapter를 같은 불변 revision으로 고정·패키징합니다. 안정판·기본 채널은 변경하지 않습니다. 변경하지 않은 통합 프로덕션 소스는 실제 Tern 0.9.5 창에서 통제 경계 **209/209**를 통과했으며, 실제 에이전트·모델 전달이나 이전 중단 복구의 증거는 아닙니다. 앱 beta.7의 패키징 차단 뒤 beta.2는 패키지·배포 메타데이터만 갱신하며 검증한 window 소스는 변경하지 않습니다.
+**베타 상태:** 인증된 로컬 HTTP 확장 통신을 제공하는 [Desktop Pet v0.4.17-beta.10](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.17-beta.10)이 필요한 테스트용 프리릴리스입니다. 일반 교환에서 매번 `tern-exchange` 프로세스를 실행하지 않고 `tern.fetch`를 사용합니다. 서명된 설치·프로필 탐색과 승인된 이전 명령은 하위 프로세스로 유지하며, 교환 실패 시 프로세스 방식으로 우회하지 않습니다. 안정판·기본 채널은 변경하지 않습니다. 프로덕션 소스는 실제 Tern 0.9.5의 격리 Luau VM에서 재시작·미확정 결과·프록시 정보 유출 방지·최종 프로필 변경 검사 등 **272/272** 통제 경계 회귀를 통과했습니다. 별도 실제 SDK HTTP 스모크도 인증된 순차 요청 32개를 완료했습니다. 이는 사용 중인 실제 세션의 연결 유지나 실제 에이전트·모델 전달, 물리 GUI 수락의 증거를 대신하지 않습니다.
 
 ### Core beta.6 adapter 호환 소스 통합
 
@@ -16,10 +16,10 @@
 
 기존 소스 커밋과 호환 기준 코드의 권한 검사를 보존합니다. 지원되는 실제 창의 회귀 결과는 아래에 기록하며, 공개 바이트 설치·인증된 재연결·물리 GUI 수락은 각각 별도의 실행 증거가 필요합니다.
 
-이번 베타는 체크섬을 검증한 Core beta.8 앱을 먼저 설치하고, 서명된 앱에 고정해 넣은 소비자 패키지를 설치합니다.
+이번 베타는 체크섬을 검증한 Core beta.10 앱을 먼저 설치하고, 검증된 전용 설치 위치의 서명된 소비자 패키지를 설치합니다.
 
 ```sh
-tern plugin install "$HOME/Applications/DesktopPet.app/Contents/Resources/integrations/tern-desktop-pet" --force
+tern plugin install "$HOME/.local/share/desktop-pet/libexec/DesktopPet.app/Contents/Resources/integrations/tern-desktop-pet" --force
 ```
 
 Tern을 재시작하거나 저장된 네이티브 연결을 바꾸지 않고 플러그인을 다시 로드합니다. 구형 앱 번들을 대신 사용하지 마세요. Tern 콜백 감시기가 이미 비활성화한 훅은 플러그인 reload 또는 새 VM이 필요하며 Connect만으로 다시 활성화되지 않습니다.
@@ -61,7 +61,9 @@ tern plugin list
 
 **Connect to desktop pet**은 저장된 절대 실행 파일을 검증하거나 다음 순서로 중립 앱을 찾습니다: 명시적 절대 실행 파일 → OS 계정 home의 검증된 비공개 `.local/share/desktop-pet/installation.json` → `PATH`의 `desktop-pet` → 실제 `brew --prefix desktop-pet` → OS 계정 home의 `Applications/DesktopPet.app`. 잘못된 명시적 경로/locator는 다른 설치로 우회하지 않고 실패합니다. bootstrap은 중립 bundle identity와 앱/도우미 서명을 확인한 뒤 일치하는 도우미의 읽기 전용 `discover --json`을 실행하고, 도우미가 실제 설치 origin/capability를 검증합니다. 앱 탐색을 위해 셸 wrapper를 실행하지 않습니다. 호환성은 플러그인/앱 버전 일치가 아닌 **`integration_api:1`**입니다.
 
-탐색·capability·`profile show --json`은 제한된 [문서화된 awaitable 하위 프로세스](https://docs.stencil.so/tern/reference/api-shared.md#ternprocessrun) 단계로 실행합니다. 일반 폴링은 재탐색이나 콜백의 동기 대기 없이 검증한 절대 경로 세 값만 사용합니다. 새 기본 경로는 검증된 앱의 profile 응답에서만 얻고 **Herdr 경로를 조합하지 않습니다**. 앱 없음·JSON 오류·시간 초과·호환 API 없음·권한/서명 오류는 실제 오류를 표시하고 저장하지 않습니다. 다른 창이 연결을 원자적으로 저장하면 이전 작업을 폐기하고 다음 주기 tick에서 정확히 그 실행 파일과 두 경로를 검증한 후 자동 재연결합니다. custom 실행 파일을 탐색 결과로 대체하지 않습니다.
+탐색·capability·`profile show --json`은 제한된 [문서화된 awaitable 하위 프로세스](https://docs.stencil.so/tern/reference/api-shared.md#ternprocessrun) 단계로 실행합니다. 일반 교환은 프로세스 실행·재탐색 대신 [비동기 `tern.fetch`](https://docs.stencil.so/tern/reference/api-shared.md#ternfetch)와 선택한 state의 비공개 `extension-http.json`을 사용합니다. 최대 4096바이트의 descriptor가 정확한 config/state·데몬 인스턴스·숫자 `127.0.0.1` 주소·인스턴스별 bearer를 결합합니다. descriptor가 바뀌면 응답 수락·의미 기반 질문 전달 전에 미확정 작업을 폐기하며, 파일을 읽은 뒤 실제 전달 직전에 저장 경로를 다시 검사합니다. 새 기본 경로는 검증된 앱의 profile 응답에서만 얻고 **Herdr 경로를 조합하지 않습니다**. 앱/descriptor 없음·JSON 오류·시간 초과·호환 API 없음·권한/서명 오류는 저장하지 않습니다. 다른 창의 저장 경로 변경은 이전 작업을 폐기하며 custom 실행 파일을 탐색 결과로 대체하지 않습니다.
+
+Tern fetch는 프로세스의 프록시 환경을 따릅니다. bearer와 세션 관찰이 로컬 밖으로 나가지 않도록 `HTTP_PROXY`·`HTTPS_PROXY`·`ALL_PROXY`(대소문자 모두)가 설정되어 있으면 존재하는 모든 `NO_PROXY`/`no_proxy` 값에 `127.0.0.1` 또는 `*`가 명시되어야 합니다. 예외가 없거나 대소문자 설정이 충돌하면 전송 전에 차단합니다. descriptor·프록시·HTTP 오류는 bearer·요청 본문·하위 fetch 진단을 노출하지 않습니다. wire v2·host/generation 검사·로컬 전용 질문·결과 중복 방지는 유지하며 네이티브 `tern-exchange` CLI는 진단용으로 남습니다. beta.3에는 기존 `integration_api:1` 외에 이 HTTP descriptor v1 지원도 필요합니다.
 
 **Configure desktop pet connection**은 의도적인 경로 변경·복구에 계속 사용할 수 있습니다. 절대 실행 파일, 절대 config 디렉터리, 절대 state 디렉터리를 순서대로 묻고 설치된 앱과 전체 후보 프로필을 검증한 뒤 한 번의 원자적 KV 쓰기로 `{ version = 1, executable = "...", config_dir = "...", state_dir = "..." }` 객체를 저장합니다. 아래의 증거로 허용된 저장 경로 전환 외에는 Connect가 객체를 다시 쓰지 않습니다. 취소·검증/저장 실패·오래된 콜백은 이전 객체를 보존합니다. 완전한 구형 세 키는 자동 저장 없이 읽을 수 있고 Configure 또는 승인된 전환 성공 시 정식 객체를 먼저 저장한 후 구형 키 정리를 시도합니다. 불완전한 구형 설정은 명시적 복구가 필요하며 잘못된 정식 객체가 있어도 구형 키를 되살리지 않습니다.
 

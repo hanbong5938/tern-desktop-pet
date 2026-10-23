@@ -5,6 +5,7 @@ return function(shared)
 	local expect = shared.expect
 	local profile = shared.profile
 	local same_profile = shared.same_profile
+	local same_paths = shared.same_paths
 	local host_inventory = shared.host_inventory
 	local unchanged_source = shared.unchanged_source
 	local fresh_source = shared.fresh_source
@@ -105,7 +106,7 @@ return function(shared)
 	case("lost command response does not invent an ask retry", function(f)
 		f:bind()
 		local lost = f:poll()
-		f:deliver(lost, {}, { stdout = "truncated command JSON" })
+		f:deliver(lost, {}, { body = "truncated command JSON" })
 		local next_request = f:poll()
 		unchanged_source(lost, next_request)
 		f:ok(next_request)
@@ -128,7 +129,7 @@ return function(shared)
 		expect(same_profile(f.kv.connection, profile("old")) and f:connection_writes() == 0, "failed save partially committed")
 		local after = f:poll()
 		unchanged_source(before, after)
-		expect(after.argv[1] == "/bin/pet-old" and after.argv[4] == "/config/old" and after.argv[6] == "/state/old", "failed save mixed profile fields")
+		expect(same_paths(after.connection, profile("old")), "failed save mixed profile fields")
 	end)
 
 	for stage = 1, 3 do
@@ -140,21 +141,22 @@ return function(shared)
 			f:answer(nil)
 			expect(#f.prompts == 0 and f:connection_writes() == 0, "cancel continued or saved prompts")
 			local after = f:poll(); unchanged_source(before, after)
-			expect(after.argv[6] == "/state/old", "cancel changed active profile")
+			expect(after.connection.state_dir == "/state/old", "cancel changed active profile")
 		end)
 	end
 
 	case("whole candidate validation precedes canonical save", function(f)
 		f:bind(); f:save({ executable = "/bin/new", config_dir = "relative", state_dir = "/state/new" })
 		expect(f:connection_writes() == 0 and same_profile(f.kv.connection, profile("old")), "invalid candidate was committed")
-		expect(f:poll().argv[4] == "/config/old", "invalid save changed live connection")
+		expect(f:poll().connection.config_dir == "/config/old", "invalid save changed live connection")
 	end)
 
 	case("successful save fences late success and preserves newer busy", function(f)
 		f:bind(); local old = f:poll(); f:save(profile("new"))
 		local fresh = f.requests[#f.requests]
 		fresh_source(old, fresh)
-		expect(f:connection_writes() == 1 and fresh.argv[1] == "/bin/pet-new" and fresh.argv[4] == "/config/new" and fresh.argv[6] == "/state/new", "save was not one whole-profile commit")
+		expect(f:connection_writes() == 1 and same_profile(f.kv.connection, profile("new"))
+			and same_paths(fresh.connection, profile("new")), "save was not one whole-profile commit")
 		f:ok(old, { operation_id = "obsolete", pane = "1", text = "must not ask" })
 		f:connect()
 		expect(#f.requests == 3 and #f.asks == 0, "late success executed ask or cleared newer busy")
@@ -179,7 +181,7 @@ return function(shared)
 	case("external profile change before exchange supersedes old busy", function(f)
 		f:bind(); local old = f:poll(); f.kv.connection = profile("external")
 		f:poll(); local fresh = f:connect(); fresh_source(old, fresh)
-		expect(fresh.argv[4] == "/config/external" and fresh.argv[6] == "/state/external", "external connection was mixed")
+		expect(same_paths(fresh.connection, profile("external")), "external connection was mixed")
 		f:reject(old, "binding_required"); f:connect()
 		expect(#f.requests == 3, "old recovery reset newer external busy")
 		f:ok(fresh)
@@ -204,7 +206,7 @@ return function(shared)
 		f:bind(); f:configure(); f:answer("/bin/pet-new")
 		f.kv.connection = profile("external"); f:answer("/config/new")
 		expect(#f.prompts == 0 and f:connection_writes() == 0 and same_profile(f.kv.connection, profile("external")), "old prompt overwrote other window")
-		expect(f:connect().argv[6] == "/state/external", "external profile was not explicitly validated")
+		expect(f:connect().connection.state_dir == "/state/external", "external profile was not explicitly validated")
 	end)
 
 	case("KV read failure blocks old command without mixing profiles", function(f)
@@ -212,7 +214,7 @@ return function(shared)
 		f:ok(old, { operation_id = "old", pane = "1", text = "never" }); f:configure(); f:poll()
 		expect(#f.asks == 0 and #f.requests == 2 and #f.prompts == 0, "failed read used fallback or delivered command")
 		f.read_error = false; local next_request = f:poll(); unchanged_source(old, next_request)
-		expect(next_request.argv[6] == "/state/old", "failed read mixed profile")
+		expect(next_request.connection.state_dir == "/state/old", "failed read mixed profile")
 	end)
 
 	case("malformed canonical never falls back to legacy", function(f)
@@ -229,7 +231,7 @@ return function(shared)
 		f:save(profile("repaired"))
 		local fresh = f.requests[#f.requests]
 		expect(f:connection_writes() == 1 and same_profile(f.kv.connection, profile("repaired")), "repair did not commit whole canonical object")
-		expect(fresh.body.instance_id == nil and fresh.argv[4] == "/config/repaired" and fresh.argv[6] == "/state/repaired", "repair retained broken fields or old binding")
+		expect(fresh.body.instance_id == nil and same_paths(fresh.connection, profile("repaired")), "repair retained broken fields or old binding")
 	end)
 
 	case("external malformed canonical blocks old command and fallback", function(f)
@@ -244,7 +246,8 @@ return function(shared)
 		f.kv = { executable = "/bin/legacy", config_dir = "/config/legacy", state_dir = "/state/legacy" }
 		local connected = f:poll()
 		expect(f:connection_writes() == 0 and f.kv.connection == nil, "Connect silently adopted old keys")
-		expect(connected.argv[1] == "/bin/legacy" and connected.argv[4] == "/config/legacy" and connected.argv[6] == "/state/legacy", "legacy custom route mixed tuple")
+		expect(connected.connection.config_dir == "/config/legacy"
+			and connected.connection.state_dir == "/state/legacy", "legacy custom route mixed tuple")
 		f:ok(connected)
 		f:save({ executable = "/bin/legacy", config_dir = "/config/legacy", state_dir = "/state/legacy" })
 		expect(f:connection_writes() == 1 and f.writes[1].key == "connection", "legacy save was not one complete commit")
@@ -260,7 +263,8 @@ return function(shared)
 
 	case("cleanup failure cannot roll back committed connection", function(f)
 		f:bind(); f.cleanup_error = true; f:save(profile("new"))
-		expect(f:connection_writes() == 1 and same_profile(f.kv.connection, profile("new")) and f.requests[#f.requests].argv[6] == "/state/new", "cleanup failure rolled back live cutover")
+		expect(f:connection_writes() == 1 and same_profile(f.kv.connection, profile("new"))
+			and same_paths(f.requests[#f.requests].connection, profile("new")), "cleanup failure rolled back live cutover")
 	end)
 
 	case("remote inventory is observed but injected remote command calls neither get nor ask", function(f)
@@ -287,21 +291,21 @@ return function(shared)
 		local response = f:response(request, { operation_id = "boundary", pane = "1", text = '🙂"\n\\' })
 		local overhead = #encode_fixture(real, response, "measure response overhead") + 1
 		response.command.text ..= string.rep("a", LIMIT - overhead + delta)
-		local stdout = encode_fixture(real, response, "encode boundary stdout") .. "\n"
-		expect(#stdout == LIMIT + delta, "fixture did not construct exact encoded stdout boundary")
-		return response.command.text, stdout
+		local body = encode_fixture(real, response, "encode boundary HTTP body") .. "\n"
+		expect(#body == LIMIT + delta, "fixture did not construct exact encoded HTTP body boundary")
+		return response.command.text, body
 	end
 
-	case("512 KiB stdout including LF accepted", function(f, real)
-		f:bind(); local pending = f:poll(); local text, stdout = boundary_response(f, real, pending, 0)
-		f:deliver(pending, {}, { stdout = stdout })
+	case("512 KiB HTTP body including LF accepted", function(f, real)
+		f:bind(); local pending = f:poll(); local text, body = boundary_response(f, real, pending, 0)
+		f:deliver(pending, {}, { body = body })
 		expect(#f.asks == 1 and f.asks[1].text == text, "exact response-byte boundary was rejected or changed")
 	end)
 
-	case("one byte over 512 KiB stdout rejected before ask", function(f, real)
-		f:bind(); local pending = f:poll(); local _, stdout = boundary_response(f, real, pending, 1)
-		f:deliver(pending, {}, { stdout = stdout })
-		expect(#f.asks == 0, "oversized stdout reached ask")
+	case("one byte over 512 KiB HTTP body rejected before ask", function(f, real)
+		f:bind(); local pending = f:poll(); local _, body = boundary_response(f, real, pending, 1)
+		f:deliver(pending, {}, { body = body })
+		expect(#f.asks == 0, "oversized HTTP body reached ask")
 		local next_request = f:poll(); unchanged_source(pending, next_request)
 		expect(#next_request.body.results == 0 and next_request.body.instance_id == "daemon-a", "oversized response reset binding or fabricated receipt")
 	end)
@@ -368,8 +372,7 @@ return function(shared)
 		expect(#f.requests == before and #f.asks == 0, "old staged inventory crossed the profile boundary")
 		local fresh = f:connect()
 		fresh_source(bound, fresh)
-		expect(fresh.argv[1] == "/bin/pet-external" and fresh.argv[4] == "/config/external"
-			and fresh.argv[6] == "/state/external", "new snapshot mixed connection fields")
+		expect(same_paths(fresh.connection, profile("external")), "new snapshot mixed connection fields")
 		expect_local_observation(fresh, "external")
 		f:ok(fresh)
 		expect(#f:poll().body.results == 0, "discarded snapshot leaked an old command receipt")
@@ -387,7 +390,7 @@ return function(shared)
 		local fresh = f:connect()
 		fresh_source(bound, fresh)
 		expect_local_observation(fresh, "repaired")
-		expect(fresh.argv[6] == "/state/repaired", "repair did not resume with the complete new profile")
+		expect(fresh.connection.state_dir == "/state/repaired", "repair did not resume with the complete new profile")
 	end)
 
 	-- Configure now proves the installation asynchronously before its atomic
@@ -632,7 +635,7 @@ return function(shared)
 		expect(f:poll().body.instance_id == "daemon-a", "new source failed to resume polling")
 	end)
 
-	case("lost process completion expires without replaying a delayed offered command", function(f)
+	case("lost HTTP completion expires without replaying a delayed offered command", function(f)
 		f:bind()
 		local lost = f:poll()
 		f.clock += 10001
@@ -640,7 +643,7 @@ return function(shared)
 		fresh_source(lost, recovered)
 		f:ok(lost, { operation_id = "lost-completion", pane = "1", text = "never replay" })
 		f:connect()
-		expect(#f.requests == 3 and #f.asks == 0, "late process completion crossed expired source or cleared newer work")
+		expect(#f.requests == 3 and #f.asks == 0, "late HTTP completion crossed expired source or cleared newer work")
 		f:ok(recovered)
 		f:offer("new source only", "after-expiry")
 		expect(#f.asks == 1 and f.asks[1].text == "new source only", "recovery did not preserve one-shot delivery")
@@ -736,24 +739,24 @@ return function(shared)
 		f:ok(request)
 	end)
 
-	case("profile cutover after launch validation blocks old-route process start", function(f)
+	case("profile cutover after transport validation blocks an old-route request", function(f)
 		-- Observe the real SDK side-effect boundary once, then change KV immediately
 		-- before that work callback in a second fixture. No source/closure inspection.
 		local baseline = f:fork()
 		baseline:bind(); baseline:hold(); baseline:poll()
 		local steps = 0
 		while #baseline.requests == 1 do
-			expect(baseline:step(), "baseline snapshot stalled before process start")
+			expect(baseline:step(), "baseline snapshot stalled before HTTP submission")
 			steps += 1
 			expect(steps <= 128, "baseline snapshot did not settle")
 		end
 		f:bind(); f:hold(); f:poll()
-		for _ = 1, steps - 1 do expect(f:step(), "snapshot stalled before launch gap") end
-		expect(#f.requests == 1, "targeted cut was not before process start")
+		for _ = 1, steps - 1 do expect(f:step(), "snapshot stalled before transport gap") end
+		expect(#f.requests == 1, "targeted cut was not before HTTP submission")
 		f.kv.connection = profile("cutover")
 		f:release()
 		expect(#f.requests == 1 and #f.asks == 0,
-			"profile changed after validation but an old-route process launched")
+			"profile changed after validation but an old-route request escaped")
 	end)
 
 	case("profile cutover after command validation blocks semantic ask", function(f)
@@ -835,5 +838,248 @@ return function(shared)
 		f:ok(offered, { operation_id = "parked-once", pane = "1", text = "parked target" })
 		expect(#f.asks == 1 and f.requests[#f.requests] == receipt, "duplicate offer replayed parked delivery")
 	end)
+
+	case("regular inventory polling never starts a process after signed setup", function(f)
+		f:bind()
+		local setup_launches = #f.process_launches
+		for _ = 1, 3 do f:ok(f:poll()) end
+		f:offer("HTTP semantic ask", "http-once")
+		f:ok(f.requests[#f.requests])
+		expect(#f.asks == 1 and #f.process_launches == setup_launches, "regular exchange launched a process or lost semantic delivery")
+	end)
+
+	for _, invalid in ipairs({
+		{ name = "missing version", key = "version" },
+		{ name = "future version", key = "version", value = 2 },
+		{ name = "string version", key = "version", value = "1" },
+		{ name = "wrong config", key = "config_dir", value = "/another/config" },
+		{ name = "wrong state", key = "state_dir", value = "/another/state" },
+		{ name = "missing token", key = "token" },
+		{ name = "short token", key = "token", value = string.rep("a", 63) },
+		{ name = "uppercase token", key = "token", value = string.rep("A", 64) },
+		{ name = "nonhex token", key = "token", value = string.rep("g", 64) },
+		{ name = "missing instance", key = "instance_id" },
+		{ name = "empty instance", key = "instance_id", value = "" },
+		{ name = "control instance", key = "instance_id", value = "daemon\nbad" },
+		{ name = "long instance", key = "instance_id", value = string.rep("a", 129) },
+		{ name = "unknown field", key = "extra", value = "ignored" },
+	}) do
+		case("endpoint rejects " .. invalid.name .. " without route mutation or subprocess fallback", function(f)
+			f.endpoint_edit = function(endpoint) endpoint[invalid.key] = invalid.value end
+			f:poll()
+			expect(#f.requests == 0 and #f.writes == 0 and #f.asks == 0 and #f.toasts > 0, "invalid endpoint authorized a request or changed the profile")
+		end)
+	end
+
+	for _, url in ipairs({
+		"https://127.0.0.1:43127/extension", "http://localhost:43127/extension",
+		"http://127.0.0.2:43127/extension", "http://[::1]:43127/extension",
+		"http://127.0.0.1:0/extension", "http://127.0.0.1:65536/extension",
+		"http://127.0.0.1:043127/extension", "http://127.0.0.1:43127/extension?profile=other",
+		"http://127.0.0.1:43127/extension#fragment", "http://127.0.0.1:43127/extension/",
+		"http://127.0.0.1:43127/stop", "http://user@127.0.0.1:43127/extension",
+		"http://127.0.0.1:43127@evil.test/extension", "http://2130706433:43127/extension",
+	}) do
+		case("unsafe endpoint URL is rejected: " .. url, function(f)
+			f.endpoint_edit = function(endpoint) endpoint.url = url end
+			f:poll()
+			expect(#f.requests == 0 and #f.writes == 0 and #f.asks == 0, "unsafe URL received private bearer or inventory")
+		end)
+	end
+
+	for _, malformed in ipairs({ "not JSON", "[]", "null",
+		'{"version":1,"version":1}', '{"version":1,"extra":null}',
+		'{"version":1,"\\u0076ersion":1}' }) do
+		case("malformed or ambiguous endpoint keys fail closed: " .. malformed, function(f)
+			f.endpoint_bytes = malformed
+			f:poll()
+			expect(#f.requests == 0 and #f.writes == 0 and #f.asks == 0, "malformed descriptor granted endpoint authority")
+		end)
+	end
+
+	case("complete duplicate and null unknown endpoint fields cannot disappear during decode", function(f, real)
+		local bytes = encode_fixture(real, f:descriptor(profile("old")))
+		for _, addition in ipairs({ ',"version":1}', ',"token":"' .. string.rep("b", 64) .. '"}', ',"extra":null}' }) do
+			f.endpoint_bytes = bytes:sub(1, -2) .. addition
+			f:poll()
+			expect(#f.requests == 0 and #f.writes == 0, "decoder merged duplicate or dropped unknown endpoint authority")
+		end
+	end)
+
+	for _, delta in ipairs({ 0, 1 }) do
+		case("endpoint bounded read at 4096 bytes plus " .. delta, function(f, real)
+			local bytes = encode_fixture(real, f:descriptor(profile("old")))
+			f.endpoint_bytes = string.rep(" ", 4096 + delta - #bytes) .. bytes
+			local request = f:poll()
+			expect(#f.requests == (delta == 0 and 1 or 0), "descriptor byte cap was not enforced at the filesystem boundary")
+			if delta == 0 then f:ok(request) end
+		end)
+	end
+
+	case("missing endpoint is actionable unsupported-native failure with no subprocess fallback", function(f)
+		f.endpoint_error = true
+		f:poll()
+		expect(#f.requests == 0 and #f.writes == 0 and #f.toasts > 0, "unsupported native endpoint absence was hidden or retried through processes")
+		f.endpoint_error = false
+		expect(f:poll() ~= nil, "endpoint publication could not recover on an ordinary poll")
+	end)
+
+	case("missing Tern HTTP capability fails closed with actionable upgrade advice", function(f)
+		f.api.fetch = nil
+		f:poll()
+		expect(#f.requests == 0 and #f.writes == 0 and #f.toasts > 0, "missing SDK capability fell back to a process")
+	end)
+
+	case("profile replacement during final descriptor read cannot send old inventory or bearer", function(f)
+		f:bind()
+		local reads = 0
+		f.endpoint_read_hook = function()
+			reads += 1
+			if reads == 2 then f.kv.connection = profile("external") end
+		end
+		f:poll()
+		expect(#f.requests == 1 and #f.asks == 0 and #f.writes == 0, "final descriptor read crossed a saved-profile fence")
+		f.endpoint_read_hook = nil
+		local fresh = f:poll()
+		expect(same_paths(fresh.connection, profile("external")), "winning original profile was not revalidated")
+	end)
+
+	case("descriptor replacement between validation and HTTP side effect sends nothing and never retries", function(f)
+		f:bind()
+		local reads = 0
+		f.endpoint_read_hook = function()
+			reads += 1
+			if reads == 1 then f.native_instance = "daemon-b" end
+		end
+		f:poll()
+		expect(#f.requests == 1 and #f.asks == 0 and #f.writes == 0, "changed descriptor was used without validation or automatically retried")
+		f.endpoint_read_hook = nil
+		f:poll()
+		expect(#f.requests == 1, "restart replayed inventory under the old binding")
+		local fresh = f:poll()
+		fresh_source(f.requests[1], fresh)
+		f:ok(fresh)
+	end)
+
+	case("daemon descriptor restart discards uncertain reports before sending to the new instance", function(f)
+		f:bind(); f:offer()
+		local old = f.requests[#f.requests]
+		f:deliver(old, {}, { error = "connection lost after sending" })
+		f.native_instance = "daemon-b"; f.server_token = string.rep("b", 64)
+		local before = #f.requests
+		f:poll()
+		expect(#f.requests == before and #f.asks == 1 and #f.writes == 0, "restart sent uncertain receipts to the new daemon or rewrote profile")
+		local fresh = f:poll()
+		fresh_source(old, fresh)
+		f:ok(fresh)
+		local bound = f:poll()
+		expect(bound.body.instance_id == "daemon-b" and #bound.body.results == 0, "new instance did not establish a clean binding")
+		f:ok(old, { operation_id = "late-old", pane = "1", text = "never" }, "daemon-a")
+		expect(#f.asks == 1 and f:poll() == bound, "late old-instance response replayed an ask or cleared newer busy")
+	end)
+
+	case("old HTTP success after descriptor restart cannot deliver its offered ask", function(f)
+		f:bind()
+		local old = f:poll()
+		f.native_instance = "daemon-b"
+		f:ok(old, { operation_id = "stale-success", pane = "1", text = "never" }, "daemon-a")
+		expect(#f.asks == 0 and #f.requests == 2 and #f.writes == 0, "queued old-instance success delivered after restart")
+		local fresh = f:poll()
+		fresh_source(old, fresh)
+		f:ok(fresh)
+	end)
+
+	case("descriptor restart after command validation fences the final semantic ask", function(f)
+		f:bind()
+		local offered = f:poll()
+		f:hold(); f:ok(offered, { operation_id = "restart-staged", pane = "1", text = "never" })
+		f.inventory_reads = {}
+		f:through_inventory("panes")
+		f.native_instance = "daemon-b"
+		f:release()
+		expect(#f.asks == 0 and #f.requests == 2, "staged ask outlived its native descriptor")
+		fresh_source(offered, f:poll())
+	end)
+
+	case("profile replacement during final endpoint read fences semantic delivery", function(f)
+		f:bind()
+		local offered = f:poll()
+		f:hold(); f:ok(offered, { operation_id = "endpoint-profile-cut", pane = "1", text = "never cross profiles" })
+		f.inventory_reads = {}
+		f:through_inventory("panes")
+		f.endpoint_read_hook = function() f.kv.connection = profile("external") end
+		f:release()
+		expect(#f.asks == 0 and #f.requests == 2, "endpoint read let an obsolete profile deliver an ask")
+		f.endpoint_read_hook = nil
+		local fresh = f:poll()
+		fresh_source(offered, fresh)
+		expect(same_paths(fresh.connection, profile("external")), "winning profile was not revalidated after endpoint read")
+	end)
+
+	case("wrong valid-shaped bearer receives HTTP401 without ask replay or automatic retry", function(f)
+		f:bind(); f:offer()
+		local receipt = f.requests[#f.requests]
+		f:deliver(receipt, {}, { error = "response lost" })
+		f.endpoint = f:descriptor(profile("old")); f.endpoint.token = string.rep("b", 64)
+		local denied = f:poll()
+		local count = #f.requests
+		f:ok(denied, { operation_id = "unauthenticated", pane = "1", text = "never" })
+		expect(#f.requests == count and #f.asks == 1 and #f.writes == 0, "authentication failure replayed or dispatched an ask")
+		f.endpoint = nil
+		local resumed = f:poll()
+		unchanged_source(denied, resumed)
+		expect(#resumed.body.results == 1 and #f.asks == 1, "authentication failure lost recoverable receipt or replayed delivery")
+		f:ok(resumed)
+	end)
+
+	for _, failure in ipairs({ { status = 403 }, { status = 500 }, { status = 302 },
+		{ status = 0, error = "private failure" }, { fetch_error = "private failure" }, { timed_out = true } }) do
+		case("HTTP transport failure grants no command authority " .. tostring(failure.status or failure.fetch_error or failure.timed_out), function(f)
+			f:bind()
+			local offered = f:poll()
+			local count = #f.requests
+			f:deliver(offered, f:response(offered, { operation_id = "failure-body", pane = "1", text = "never" }), failure)
+			expect(#f.asks == 0 and #f.requests == count and #f.writes == 0, "HTTP error body authorized command or triggered retry")
+			for _, message in ipairs(f.logs) do expect(not message:find("private failure", 1, true), "SDK transport error leaked private data") end
+		end)
+	end
+
+	case("fetch registration failure releases ownership without exposing request secrets", function(f)
+		f:bind()
+		f.fetch_start_error = true
+		f:poll()
+		expect(#f.requests == 1 and #f.asks == 0 and #f.writes == 0, "failed HTTP registration started or replayed work")
+		for _, message in ipairs(f.logs) do expect(not message:find("private data", 1, true), "fetch registration error leaked SDK details") end
+		f.fetch_start_error = false
+		expect(#f:poll().body.results == 0, "registration failure kept exchange permanently busy")
+	end)
+
+	for index, environment in ipairs({
+		{ HTTP_PROXY = "http://proxy.invalid" },
+		{ all_proxy = "socks5://proxy.invalid", NO_PROXY = "localhost" },
+		{ HTTPS_PROXY = "http://proxy.invalid", no_proxy = ".127.0.0.1" },
+		{ http_proxy = "http://proxy.invalid", NO_PROXY = "127.0.0.1.evil" },
+		{ ALL_PROXY = "http://proxy.invalid", NO_PROXY = "127.0.0.1", no_proxy = "" },
+		{ HTTP_PROXY = "http://proxy.invalid", NO_PROXY = "", no_proxy = "*" },
+	}) do
+		case("proxy environment without unambiguous literal loopback exemption sends nothing " .. index, function(f)
+			f.environment = environment
+			f:poll()
+			expect(#f.requests == 0 and #f.writes == 0 and #f.asks == 0, "private inventory or bearer could escape through a proxy")
+			for _, message in ipairs(f.logs) do expect(not message:find("proxy.invalid", 1, true), "proxy settings leaked in diagnostics") end
+		end)
+	end
+
+	for index, environment in ipairs({
+		{ HTTP_PROXY = "http://proxy.invalid", NO_PROXY = "localhost, 127.0.0.1" },
+		{ all_proxy = "socks5://proxy.invalid", no_proxy = "*" },
+		{ HTTPS_PROXY = "http://proxy.invalid", NO_PROXY = "*", no_proxy = "127.0.0.1" },
+	}) do
+		case("explicit literal loopback proxy exemption preserves direct HTTP operation " .. index, function(f)
+			f.environment = environment
+			f:bind(); f:offer()
+			expect(#f.asks == 1 and #f.writes == 0, "safe loopback exemption disabled regular semantic delivery")
+		end)
+	end
 
 end

@@ -4,10 +4,11 @@ return function(shared)
 	local case = shared.case
 	local expect = shared.expect
 	local profile = shared.profile
+	local same_paths = shared.same_paths
 	local same_profile = shared.same_profile
 	local fresh_source = shared.fresh_source
 
-	case("cold entry defers clock storage and process reads until startup", function(f)
+	case("cold entry defers clock storage endpoint and process reads until startup", function(f)
 		expect(#f.load_reads == 0 and #f.requests == 0 and #f.setup_requests == 0, "cold entry synchronously read live connection state")
 		local request = f:poll()
 		expect(type(request.body.window) == "string" and request.body.epoch > 0, "deferred startup failed to establish a fresh source")
@@ -16,7 +17,8 @@ return function(shared)
 	case("fresh defaults come only from verified readonly native profile", function(f)
 		f.kv = {}
 		local request = f:poll()
-		expect(request.argv[1] == "/bin/desktop-pet" and request.argv[4] == "/config/default" and request.argv[6] == "/state/default", "defaults were constructed by the plugin")
+		expect(request.connection.config_dir == "/config/default"
+			and request.connection.state_dir == "/state/default", "defaults were constructed by the plugin")
 		expect(#f.writes == 0 and #f.setup_requests == 4, "Connect saved defaults or omitted readonly proof stages")
 		for _, setup in ipairs(f.setup_requests) do
 			expect(setup.argv[2] ~= "start" and setup.argv[2] ~= "ensure" and setup.argv[2] ~= "install", "consumer silently started or installed native")
@@ -50,7 +52,7 @@ return function(shared)
 	case("incompatible integration capability cannot commit configure candidate", function(f)
 		f:bind(); f.integration_api = 2; f:save(profile("new"))
 		expect(f:connection_writes() == 0 and same_profile(f.kv.connection, profile("old")), "incompatible native was saved")
-		expect(f:poll().argv[1] == "/bin/pet-old", "failed capability check changed active executable")
+		expect(same_paths(f:poll().connection, profile("old")), "failed capability check changed active profile")
 	end)
 
 	case("spawn permission failure leaves connection untouched", function(f)
@@ -71,7 +73,7 @@ return function(shared)
 		local request = f:poll()
 		local proof = f.setup_requests[2]
 		expect(proof.argv[5] == "/app/DesktopPet.app/Contents/MacOS/desktop-pet" and proof.argv[6] == "", "locator bypassed helper-owned private locator proof")
-		expect(request.argv[1] == "/app/DesktopPet.app/Contents/MacOS/desktop-pet" and #f.writes == 0, "locator route did not remain readonly")
+		expect(request ~= nil and #f.writes == 0, "locator route did not remain readonly")
 	end)
 
 	local function legacy_route()
@@ -131,7 +133,7 @@ return function(shared)
 		f.kv.connection = approved_route().target; f.handover_protocol = 1
 		local first = f:bind(); f:ok(f:poll())
 		local next_request = f:poll()
-		expect(next_request.argv[1] == first.argv[1] and next_request.body.window == first.body.window
+		expect(same_paths(next_request.connection, first.connection) and next_request.body.window == first.body.window
 			and #f.handover_requests == 0 and #f.writes == 0 and #f.toasts == 0 and #f.logs > 0,
 			"optional absence fabricated authority, changed healthy routing, or reported a false disconnect")
 	end)
@@ -195,7 +197,7 @@ return function(shared)
 		f.kv.connection = profile("external"); f:complete_handover()
 		expect(#f.handover_receipts == 0 and #f.toasts == toasts and same_profile(f.kv.connection, profile("external")),
 			"stale handover completion claimed connection or changed custom settings")
-		expect(f:poll().argv[1] == "/bin/pet-external", "handover cancellation failed to honor the exact custom route")
+		expect(same_paths(f:poll().connection, profile("external")), "handover cancellation failed to honor the exact custom profile")
 	end)
 
 	for _, field in ipairs({ "operation_id", "plan_path", "plan_sha256", "token", "consumer_revision", "target_instance_id", "unknown", "missing" }) do
@@ -276,7 +278,7 @@ return function(shared)
 		f.kv.connection = legacy_route(); f.migration_available = true
 		local request = f:poll()
 		expect(#f.prompts == 0 and #f.setup_requests == 5 and f:connection_writes() == 1, "approved migration required another acknowledgement or skipped proof")
-		expect(request.argv[1] == "/bin/desktop-pet" and request.argv[4] == "/old/config" and request.argv[6] == "/old/state", "migration mixed the original route pair")
+		expect(same_paths(request.connection, legacy_route()), "migration mixed the original route pair")
 		expect(same_profile(f.kv.connection, approved_route().target), "migration did not atomically save its verified target")
 		expect(request.body.instance_id == nil and #request.body.results == 0 and request.body.sequence == 1, "migration replayed a binding or report")
 		f:ok(request); f:ok(f:poll())
@@ -287,14 +289,15 @@ return function(shared)
 		local alias = "/opt/homebrew/bin/herdr-desktop-pet"
 		f.kv = { executable = alias, config_dir = "/original/config", state_dir = "/original/state", unrelated = "keep" }
 		f.missing_executables[alias] = true; f.migration_available = true
+		f.native_instance = "committed-daemon"
 		local request = f:poll()
 		local original = real.json.decode(f.setup_requests[5].options.stdin)
 		expect(original.executable == alias and original.config_dir == "/original/config"
 			and original.state_dir == "/original/state", "missing alias proof lost the exact saved original")
 		expect(#f.missing_invocations == 0 and #f.prompts == 0 and f:connection_writes() == 1,
 			"missing alias was executed or required manual Configure")
-		expect(request.argv[1] == "/bin/desktop-pet" and request.argv[4] == "/original/config"
-			and request.argv[6] == "/original/state" and f.kv.unrelated == "keep", "alias repair changed the original profile or unrelated settings")
+		expect(request.connection.config_dir == "/original/config"
+			and request.connection.state_dir == "/original/state" and f.kv.unrelated == "keep", "alias repair changed the original profile or unrelated settings")
 		expect(request.body.instance_id == nil and #request.body.results == 0, "route save substituted for a fresh registration")
 		expect(f:poll() == request and #f.requests == 1, "pending real exchange was mistaken for a completed binding")
 		f:ok(request, nil, "committed-daemon")
@@ -340,7 +343,7 @@ return function(shared)
 		local original = real.json.decode(f.setup_requests[5].options.stdin)
 		expect(original.executable == "herdr-desktop-pet", "legacy query invented an absolute source path")
 		expect(f:connection_writes() == 1 and f.kv.executable == nil and f.kv.config_dir == nil and f.kv.state_dir == nil, "approved old tuple was not canonicalized as a whole")
-		expect(request.argv[4] == "/old/config" and request.argv[6] == "/old/state", "old tuple migration changed native paths")
+		expect(request.connection.config_dir == "/old/config" and request.connection.state_dir == "/old/state", "old tuple migration changed native paths")
 	end)
 
 	case("unapproved legacy route stays unchanged and reconnects on later periodic proof", function(f)
@@ -406,8 +409,7 @@ return function(shared)
 		f.hold_migration = false; f:complete_setup()
 		expect(#f.requests == 0 and #f.writes == 0 and same_profile(f.kv.connection, profile("external")), "stale migration proof overwrote another window")
 		local request = f:poll()
-		expect(request.argv[1] == "/bin/pet-external" and request.argv[4] == "/config/external"
-			and request.argv[6] == "/state/external", "next tick failed to validate the exact winning route")
+		expect(same_paths(request.connection, profile("external")), "next tick failed to validate the exact winning profile")
 	end)
 
 	case("malformed canonical change fences pending proof without reviving old keys", function(f)
@@ -432,8 +434,7 @@ return function(shared)
 		for _, toast in ipairs(f.toasts) do expect(toast.title ~= "Desktop pet connected", "superseded route was reported connected") end
 		f.after_connection_save = nil
 		local request = f:poll()
-		expect(request.argv[1] == "/bin/pet-external" and request.argv[4] == "/config/external"
-			and request.argv[6] == "/state/external" and f:connection_writes() == 1, "winning custom route was not validated unchanged")
+		expect(same_paths(request.connection, profile("external")) and f:connection_writes() == 1, "winning custom profile was not validated unchanged")
 	end)
 
 	case("post-save read failure leaves the saved target inactive until exact revalidation", function(f)
@@ -448,8 +449,7 @@ return function(shared)
 			"unreadable settings caused subprocess retries or activated an unverified route")
 		f.after_connection_save = nil; f.read_error = false
 		local request = f:poll()
-		expect(request.argv[1] == "/bin/desktop-pet" and request.argv[4] == "/old/config"
-			and request.argv[6] == "/old/state" and f:connection_writes() == 1, "read recovery required another route rewrite or changed the profile")
+		expect(same_paths(request.connection, legacy_route()) and f:connection_writes() == 1, "read recovery required another route rewrite or changed the profile")
 	end)
 
 	case("late migration proof is fenced by a newer cancelled Configure", function(f)
@@ -467,8 +467,7 @@ return function(shared)
 		f.kv.connection = profile("external")
 		local fresh = f:poll()
 		fresh_source(old, fresh)
-		expect(fresh.argv[1] == "/bin/pet-external" and fresh.argv[4] == "/config/external"
-			and fresh.argv[6] == "/state/external", "active window failed exact automatic reconnect")
+		expect(same_paths(fresh.connection, profile("external")), "active window failed exact automatic reconnect")
 		f:ok(old, { operation_id = "old-route", pane = "1", text = "never" })
 		expect(#f.asks == 1 and #fresh.body.results == 0, "automatic reconnect replayed an old ask or result")
 	end)
@@ -494,8 +493,7 @@ return function(shared)
 		expect(query.argv[2] == "legacy-migration-route"
 			and real.json.decode(query.options.stdin).executable == retained_neutral_route().executable, "neutral repair lost exact old canonical executable")
 		expect(#f.setup_requests == 5 and f:connection_writes() == 1 and #f.prompts == 0, "neutral migration invoked old route or required another approval")
-		expect(request.argv[1] == "/bin/desktop-pet" and request.argv[4] == "/old/config"
-			and request.argv[6] == "/old/state", "neutral repair substituted a different profile pair")
+		expect(same_paths(request.connection, retained_neutral_route()), "neutral repair substituted a different profile pair")
 		expect(request.body.instance_id == nil and request.body.sequence == 1 and #request.body.results == 0, "neutral repair reused an old source or reports")
 	end)
 
@@ -507,7 +505,7 @@ return function(shared)
 			and same_profile(f.kv.connection, retained_neutral_route()), "missing neutral route was replaced without approval")
 		f.migration_available = true
 		local request = f:poll()
-		expect(request ~= nil and request.argv[1] == "/bin/desktop-pet" and f:connection_writes() == 1
+		expect(request ~= nil and same_profile(f.kv.connection, approved_route().target) and f:connection_writes() == 1
 			and #f.prompts == 0, "later owner proof failed to reconnect missing canonical route automatically")
 	end)
 
@@ -517,8 +515,7 @@ return function(shared)
 		local request = f:poll()
 		expect(#f.setup_requests == 5 and #f.missing_invocations == 0 and f:connection_writes() == 1,
 			"removed keg was executed before authenticated current-owner proof")
-		expect(request.argv[1] == "/bin/desktop-pet" and request.argv[4] == "/old/config"
-			and request.argv[6] == "/old/state" and #f.prompts == 0, "removed-keg repair changed profile or required Configure")
+		expect(same_paths(request.connection, retained_neutral_route()) and #f.prompts == 0, "removed-keg repair changed profile or required Configure")
 	end)
 
 	case("unbound custom route cannot borrow another migration proof", function(f)
@@ -535,7 +532,7 @@ return function(shared)
 		local first = f:bind()
 		local probes = #f.setup_requests
 		local next_request = f:poll()
-		expect(next_request.argv[1] == retained_neutral_route().executable
+		expect(same_paths(next_request.connection, retained_neutral_route())
 			and next_request.body.window == first.body.window and #f.writes == 0, "missing proof changed healthy original route or source")
 		expect(#f.setup_requests == probes, "healthy neutral polling repeated transport discovery")
 	end)
@@ -550,14 +547,14 @@ return function(shared)
 		f.migration_proof.original.state_dir = "/different/state"
 		local retained = f:poll()
 		expect(same_profile(f.kv.connection, retained_neutral_route()) and #f.writes == 0
-			and retained.argv[1] == retained_neutral_route().executable, "stale proof changed active neutral route")
+			and same_paths(retained.connection, retained_neutral_route()), "stale proof changed active neutral route")
 		expect(retained.body.window == receipt.body.window and #retained.body.results == 1 and #f.asks == 1,
 			"failed proof reset binding, dropped uncertain report, or replayed ask")
 		f:deliver(retained, {}, { timed_out = true })
 		f.migration_proof = nil
 		local fresh = f:poll()
 		fresh_source(retained, fresh)
-		expect(fresh.argv[1] == "/bin/desktop-pet" and f:connection_writes() == 1
+		expect(same_profile(f.kv.connection, approved_route().target) and f:connection_writes() == 1
 			and #f.asks == 1 and #fresh.body.results == 0, "successful exact proof replayed old delivery or failed atomic cutover")
 	end)
 
@@ -568,7 +565,7 @@ return function(shared)
 		f.migration_available = true
 		local fresh = f:poll()
 		fresh_source(old, fresh)
-		expect(fresh.argv[1] == "/bin/desktop-pet" and f:connection_writes() == 1 and #f.prompts == 0,
+		expect(same_profile(f.kv.connection, approved_route().target) and f:connection_writes() == 1 and #f.prompts == 0,
 			"daemon identity change kept stale canonical route without consulting committed proof")
 	end)
 
@@ -578,9 +575,10 @@ return function(shared)
 		local old = f.requests[#f.requests]
 		expect(#old.body.results == 1 and #f.asks == 1, "fixture lacks an uncertain old-instance receipt")
 		f:reject(old, "instance_changed", "daemon-b")
+		f.native_instance = "daemon-b"
 		local fresh = f:poll()
 		fresh_source(old, fresh)
-		expect(fresh.argv[1] == "/bin/desktop-pet" and f:connection_writes() == 0 and #f.prompts == 0,
+		expect(same_paths(fresh.connection, approved_route().target) and f:connection_writes() == 0 and #f.prompts == 0,
 			"same executable restart rewrote settings or required Configure")
 		f:ok(old, { operation_id = "stale-instance", pane = "1", text = "never" }, "daemon-a")
 		expect(#f.asks == 1 and f:poll() == fresh, "stale instance callback replayed delivery or bypassed pending registration")
@@ -594,8 +592,7 @@ return function(shared)
 		local custom = { version = 1, executable = "/custom/desktop-pet", config_dir = "/custom/config", state_dir = "/custom/state" }
 		f.kv.connection = custom; f.migration_available = true; f.migration_proof = approved_route()
 		local request = f:poll()
-		expect(request.argv[1] == custom.executable and request.argv[4] == custom.config_dir
-			and request.argv[6] == custom.state_dir and #f.writes == 0 and same_profile(f.kv.connection, custom),
+		expect(same_paths(request.connection, custom) and #f.writes == 0 and same_profile(f.kv.connection, custom),
 			"unrelated native proof overwrote a custom executable sharing the neutral basename")
 	end)
 
@@ -614,7 +611,7 @@ return function(shared)
 		f:complete_setup()
 		expect(#f.requests == 0 and #f.writes == 0 and #f.setup_requests == 1, "late discovery crossed another window's profile boundary")
 		local fresh = f:connect()
-		expect(fresh.argv[1] == "/bin/pet-external", "explicit reconnect did not validate the winning object")
+		expect(same_paths(fresh.connection, profile("external")), "explicit reconnect did not validate the winning profile")
 	end)
 
 	case("late candidate verification cannot save after newer Configure cancels", function(f)

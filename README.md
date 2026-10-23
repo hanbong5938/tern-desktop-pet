@@ -2,13 +2,13 @@
 
 **English** · [한국어](README.ko.md)
 
-## Desktop Pet consumer — plugin 0.2.2-beta.2
+## Desktop Pet consumer — plugin 0.2.2-beta.3
 
 This window plugin connects Tern agent observations and semantic asks to the separately installed, host-neutral [Desktop Pet](https://github.com/hanbong5938/desktop-pet) app. Native adapter code lives in `native-adapter`; the app/UI/artwork/updater live in the core repository. The plugin **never downloads, installs, builds, auto-starts, or stops the native app**. Updating/removing the plugin does not update/remove the shared app or either native profile directory.
 
 [App homepage](https://hanbong5938.github.io/desktop-pet/en/) · [Core installation / profiles](https://github.com/hanbong5938/desktop-pet/blob/main/docs/development.md) · [Current usage](https://github.com/hanbong5938/desktop-pet/blob/main/docs/usage.md) · [Core Wiki](https://github.com/hanbong5938/desktop-pet/wiki) · [Legacy migration](https://github.com/hanbong5938/desktop-pet/blob/main/docs/migrations/desktop-pet.md). These are core-owned destination links, not hosted-publication or real reconnect evidence.
 
-**Beta status:** this testing-only prerelease combines exchange recovery and final pane/session delivery guards with the signed-owner migration and Core beta.6 compatibility baseline. [Desktop Pet v0.4.17-beta.8](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.17-beta.8) pins and packages this consumer with its matching native adapter. Stable/default channels are unchanged. The unchanged integrated production source passed **209/209** controlled-boundary cases in an actual Tern 0.9.5 window; this is not proof of real agent/model delivery or migration crash recovery. Beta.2 updates package/release metadata after the paired app's beta.7 packaging gate failed; it does not change the tested window source.
+**Beta status:** this testing-only prerelease requires [Desktop Pet v0.4.17-beta.10](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.17-beta.10), which pins this consumer and provides its authenticated loopback extension transport. Regular exchange uses `tern.fetch` instead of launching `tern-exchange` on every poll. Signed installation/profile discovery and approved handover commands remain subprocesses; there is no subprocess exchange fallback. Stable/default channels are unchanged. The production source passed **272/272** controlled-boundary regressions in Tern 0.9.5's actual isolated Luau VM, including daemon restart, uncertain receipts, proxy confidentiality and final profile-change fencing. A separate real-SDK HTTP smoke completed 32 authenticated sequential requests; this is not proof of live user-session continuity, real agent/model delivery or physical GUI acceptance.
 
 ### Core beta.6 adapter compatibility merge
 
@@ -16,10 +16,10 @@ The source compatibility branch combines `work/authority-deadline-021` (`7276c1b
 
 The beta preserves existing source commits and the compatibility baseline's authority checks. Its supported-window regression result is recorded below; published-byte installation, authenticated reconnect and physical GUI acceptance require their own runtime evidence.
 
-For this beta, install the checksum-verified Core beta.8 app first, then install its signed, pinned consumer package:
+For this beta, install the checksum-verified Core beta.10 app first, then install its signed, pinned consumer package from the verified canonical installation:
 
 ```sh
-tern plugin install "$HOME/Applications/DesktopPet.app/Contents/Resources/integrations/tern-desktop-pet" --force
+tern plugin install "$HOME/.local/share/desktop-pet/libexec/DesktopPet.app/Contents/Resources/integrations/tern-desktop-pet" --force
 ```
 
 This reloads the plugin without restarting Tern or changing its saved native connection. Do not substitute an older app bundle. A hook already disabled by Tern's callback watchdog requires plugin reload or a fresh VM; Connect alone does not re-enable it.
@@ -61,7 +61,11 @@ After publication, plugin installation is separately `tern plugin install https:
 
 **Connect to desktop pet** validates a saved absolute executable, or discovers the neutral executable in this exact order: explicit absolute executable → validated private OS-account-home `.local/share/desktop-pet/installation.json` → `PATH` `desktop-pet` → actual `brew --prefix desktop-pet` → OS-account-home `Applications/DesktopPet.app`. Invalid explicit paths or locators fail closed instead of selecting another installation. The bootstrap verifies the neutral bundle identity and app/helper signatures before executing the paired helper's read-only `discover --json`; the helper validates actual origin and capabilities. Shell wrappers are never executed to discover an app. Compatibility is **`integration_api:1`**, not equality between plugin and app versions.
 
-Discovery, native capabilities, and `profile show --json` run as bounded [documented awaitable subprocesses](https://docs.stencil.so/tern/reference/api-shared.md#ternprocessrun). Normal polling uses only the resulting validated absolute triple, without rediscovery or synchronous callback waits. Fresh defaults come from the verified native profile, **never** constructed Herdr paths. A missing app, bad JSON, timeout, incompatible API, permission failure, or bad signature shows the actual error and saves nothing. If another window atomically changes the saved route, old work is retired and the next periodic tick validates that exact new executable/profile before reconnecting; a custom executable is never replaced by discovery.
+Discovery, native capabilities, and `profile show --json` run as bounded [documented awaitable subprocesses](https://docs.stencil.so/tern/reference/api-shared.md#ternprocessrun). Regular exchange uses [asynchronous `tern.fetch`](https://docs.stencil.so/tern/reference/api-shared.md#ternfetch) and the selected state's private `extension-http.json`, not process launch or rediscovery. The descriptor is bounded to 4096 bytes and binds the exact config/state pair, daemon instance, numeric `127.0.0.1` endpoint and per-instance bearer. Changed descriptor bytes retire uncertain work before response admission or semantic delivery; the saved route is checked again after descriptor reads and immediately before the side effect. Fresh defaults come from the verified native profile, **never** constructed Herdr paths. A missing app/descriptor, invalid JSON, timeout, incompatible API, permission failure or bad signature saves nothing. Another window's saved-route change retires old work; a custom executable is never replaced by discovery.
+
+Tern fetch inherits proxy environment settings. To keep private bearer tokens and session observations on loopback, any configured `HTTP_PROXY`, `HTTPS_PROXY` or `ALL_PROXY` (either case) requires every present `NO_PROXY`/`no_proxy` value to explicitly include `127.0.0.1` or `*`. Conflicting or missing exemptions fail closed before sending. Descriptor, proxy and HTTP errors never expose the bearer, request body or underlying fetch diagnostics. This transport does not change wire v2, host/generation fencing, local-only semantic asks or receipt deduplication; the native `tern-exchange` CLI remains available for diagnostics.
+
+Plugin beta.3 additionally requires HTTP descriptor v1 support; `integration_api:1` alone is not sufficient for this transport.
 
 **Configure desktop pet connection** remains available for intentional route changes and repairs. It prompts for the absolute executable, absolute config directory, then absolute state directory, validates the complete candidate against the installed app/profile, and performs one atomic KV save. The canonical object remains `{ version = 1, executable = "...", config_dir = "...", state_dir = "..." }`. Except for proof-authorized saved-route handover below, Connect does not rewrite it. Cancel, validation failure, save failure, and obsolete callbacks preserve the previous object. A complete old three-key tuple may be read without silent adoption; successful Configure or approved handover saves the canonical object before best-effort old-key cleanup. Incomplete old tuples require explicit repair, and malformed canonical data never revives old keys.
 

@@ -7,7 +7,8 @@ local MAX_REQUEST_BYTES = 256 * 1024
 local MAX_RESPONSE_BYTES = 512 * 1024
 local MAX_FIELD_BYTES = 4096
 local INTERVAL_MS = 1200
-local PROCESS_TIMEOUT_MS = 2600
+local HTTP_TIMEOUT_MS = 2600
+local MAX_ENDPOINT_BYTES = 4096
 local EXCHANGE_TIMEOUT_MS = 10000
 local INVENTORY_CHUNK = 32
 local ERROR_REPEAT_MS = 30000
@@ -156,6 +157,106 @@ end
 local function same_connection(a, b)
 	return a ~= nil and b ~= nil and a.version == b.version and a.executable == b.executable
 		and a.config_dir == b.config_dir and a.state_dir == b.state_dir
+end
+
+local ENDPOINT_FIELDS = { version = true, instance_id = true, config_dir = true, state_dir = true, url = true, token = true }
+
+-- Descriptor values are flat. Check the actual keys before JSON decoding drops
+-- null members or merges duplicates; keys must use their literal schema spelling.
+local function endpoint_fields(bytes)
+	local cursor = bytes:find("%S")
+	if cursor == nil or bytes:sub(cursor, cursor) ~= "{" then error("invalid native HTTP endpoint object") end
+	cursor += 1
+	local seen, count = {}, 0
+	while true do
+		cursor = bytes:find("%S", cursor)
+		if cursor == nil then error("incomplete native HTTP endpoint") end
+		if bytes:sub(cursor, cursor) == "}" then
+			if count ~= 6 or bytes:find("%S", cursor + 1) ~= nil then error("incomplete native HTTP endpoint fields") end
+			return
+		end
+		local first, last, key = bytes:find('"([%w_]+)"%s*:', cursor)
+		if first ~= cursor or not ENDPOINT_FIELDS[key] or seen[key] then error("invalid or duplicate native HTTP endpoint field") end
+		seen[key] = true
+		count += 1
+		cursor = bytes:find("%S", last + 1)
+		if cursor == nil then error("missing native HTTP endpoint value") end
+		if bytes:sub(cursor, cursor) == '"' then
+			cursor += 1
+			while cursor <= #bytes do
+				local byte = bytes:sub(cursor, cursor)
+				cursor += 1
+				if byte == "\\" then cursor += 1
+				elseif byte == '"' then break end
+			end
+		else
+			if key ~= "version" then error("invalid native HTTP endpoint value") end
+			cursor = bytes:find("[,}]", cursor)
+			if cursor == nil then error("incomplete native HTTP endpoint value") end
+		end
+		cursor = bytes:find("%S", cursor)
+		if cursor == nil then error("incomplete native HTTP endpoint object") end
+		local separator = bytes:sub(cursor, cursor)
+		if separator == "," then cursor += 1
+		elseif separator ~= "}" then error("invalid native HTTP endpoint separator") end
+	end
+end
+
+-- Tern fetch inherits process proxy settings and offers no per-request override.
+-- Require an explicit literal loopback exemption; reject conflicting case variants
+-- rather than depending on the HTTP client's environment-variable precedence.
+local function require_direct_loopback()
+	local proxied = false
+	for _, name in ipairs({ "ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy" }) do
+		local value = tern.getenv(name)
+		if value ~= nil and value ~= "" then proxied = true end
+	end
+	if not proxied then return end
+	local exempt = false
+	for _, name in ipairs({ "NO_PROXY", "no_proxy" }) do
+		local value = tern.getenv(name)
+		if value ~= nil then
+			local matched = false
+			for entry in value:gmatch("[^,]+") do
+				entry = entry:match("^%s*(.-)%s*$")
+				if entry == "127.0.0.1" or entry == "*" then matched = true end
+			end
+			if not matched then error("native HTTP exchange requires NO_PROXY and no_proxy, when set, to include 127.0.0.1; no request was sent") end
+			exempt = true
+		end
+	end
+	if not exempt then error("native HTTP exchange requires NO_PROXY=127.0.0.1 when a proxy is configured; no request was sent") end
+end
+
+-- fs.read's bounded form rejects nonregular/symlink final files before opening.
+-- The signed profile selects this private daemon-owned descriptor; neither PATH
+-- nor a discovered endpoint may grant permission to change the saved profile.
+local function read_endpoint_bytes(connection)
+	if type(tern.fetch) ~= "function" or type(tern.fs) ~= "table" or type(tern.fs.read) ~= "function" then
+		error("Tern lacks bounded filesystem/network support; upgrade Tern to use Desktop Pet")
+	end
+	local loaded, bytes = pcall(tern.fs.read, connection.state_dir .. "/extension-http.json", MAX_ENDPOINT_BYTES)
+	if not loaded then
+		error("native HTTP extension endpoint unavailable; use a Desktop Pet version supporting extension-http.json and ensure the selected profile is running")
+	end
+	if type(bytes) ~= "string" or #bytes > MAX_ENDPOINT_BYTES then error("invalid native HTTP endpoint size") end
+	return bytes
+end
+
+local function read_endpoint(connection)
+	local bytes = read_endpoint_bytes(connection)
+	endpoint_fields(bytes)
+	local decoded, endpoint = pcall(tern.json.decode, bytes)
+	if not decoded or type(endpoint) ~= "table" or endpoint.version ~= 1 then error("invalid native HTTP endpoint descriptor") end
+	if endpoint.config_dir ~= connection.config_dir or endpoint.state_dir ~= connection.state_dir then
+		error("native HTTP endpoint does not match the exact selected profile")
+	end
+	if type(endpoint.instance_id) ~= "string" or endpoint.instance_id == "" or #endpoint.instance_id > 128
+		or endpoint.instance_id:find("[%c]") or type(endpoint.token) ~= "string"
+		or #endpoint.token ~= 64 or endpoint.token:find("[^0-9a-f]") then error("invalid native HTTP endpoint identity") end
+	local port = type(endpoint.url) == "string" and endpoint.url:match("^http://127%.0%.0%.1:([1-9][0-9]*)/extension$") or nil
+	if port == nil or #port > 5 or tonumber(port) > 65535 then error("unsafe native HTTP endpoint URL") end
+	return endpoint, bytes
 end
 
 local function cleanup_legacy()
@@ -726,9 +827,20 @@ local function current_exchange(data, _cx)
 	return not expire_exchange()
 end
 
+-- A queued HTTP completion or staged ask cannot outlive its daemon descriptor.
+-- Compare bounded bytes only here: decoding stays out of the final ask callback.
+local function current_endpoint(data, cx)
+	local loaded, bytes = pcall(read_endpoint_bytes, data.connection)
+	if loaded and bytes == data.endpoint_bytes then return true end
+	reset_identity()
+	if neutral_executable(data.connection.executable) then route_repair_required = true end
+	show_error(cx, "native HTTP endpoint changed; pending replies have unknown delivery")
+	return false
+end
+
 
 -- Each continuation owns one ticket and a fresh context. KV/profile validation
--- is a separate callback from SDK reads, CPU chunks, encoding and process start.
+-- is a separate callback from SDK reads, CPU chunks, encoding and HTTP start.
 -- This cannot revive a hook disabled by Tern; the deadline still releases its
 -- ownership on the next viable trigger (or explicit Connect).
 local function continue_exchange(data, cx, work, failed, checked)
@@ -845,6 +957,7 @@ local function revalidate_command(data, command, cx)
 	collect_inventory(data, cx, function(fresh_cx, _hosts, fresh)
 		-- Profile validation and semantic delivery must share a callback: another
 		-- window may have changed shared KV since the preceding continuation.
+		if not current_endpoint(data, fresh_cx) then return end
 		refresh_connection()
 		if not current_exchange(data, fresh_cx) then return end
 		local current = fresh[command.pane]
@@ -1094,46 +1207,54 @@ exchange = function(cx)
 		if #request > MAX_REQUEST_BYTES then
 			error("desktop pet inventory exceeds the exchange limit")
 		end
-		continue_exchange(data, encode_cx, function(_process_cx)
-		-- Route validation is deliberately synchronous at the side-effect boundary.
+		continue_exchange(data, encode_cx, function(endpoint_cx)
+		-- Decode separately from the final saved-route fence and HTTP registration.
+		local endpoint, endpoint_bytes = read_endpoint(connection)
+		continue_exchange(data, endpoint_cx, function(fetch_cx)
+		-- Re-read bounded descriptor bytes and saved route at the side-effect boundary.
+		-- Changed bytes are never retried in this exchange and no token is cached.
+		if read_endpoint_bytes(connection) ~= endpoint_bytes then error("native HTTP endpoint changed before request; no request was sent") end
+		require_direct_loopback()
 		refresh_connection()
-		if not current_exchange(data, _process_cx) then return end
-		local argv = { connection.executable, "tern-exchange", "--config-dir", connection.config_dir,
-			"--state-dir", connection.state_dir }
-		data.phase = "process"
-		tern.process.run(argv, {
-			stdin = request,
-			timeout_ms = PROCESS_TIMEOUT_MS,
-			-- Neutral environment and explicit arguments always select the same pair.
-			env = { DESKTOP_PET_CONFIG_DIR = connection.config_dir, DESKTOP_PET_STATE_DIR = connection.state_dir },
-		}):next(function(result, process_error, response_cx)
-			if data.phase ~= "process" or not current_exchange(data, response_cx) then
-				return
-			end
+		if not current_exchange(data, fetch_cx) then return end
+		if data.instance_id ~= nil and endpoint.instance_id ~= data.instance_id then
+			reset_identity()
+			if neutral_executable(connection.executable) then route_repair_required = true end
+			show_error(fetch_cx, "desktop pet restarted; pending replies have unknown delivery")
+			return
+		end
+		data.connection, data.endpoint_bytes = connection, endpoint_bytes
+		data.phase = "fetch"
+		local started = pcall(function()
+		tern.fetch(endpoint.url, {
+			method = "POST", body = request, timeout_ms = HTTP_TIMEOUT_MS,
+			headers = { Authorization = "Bearer " .. endpoint.token, ["Content-Type"] = "application/json" },
+		}):next(function(result, fetch_error, response_cx)
+			if data.phase ~= "fetch" or not current_exchange(data, response_cx) then return end
 			-- Consume this completion before staging a one-shot command. A repeated
 			-- callback cannot schedule another ask while revalidation is pending.
 			data.phase = "response"
 			continue_exchange(data, response_cx, function(response_cx)
 			local succeeded, pending = pcall(function()
-				if process_error ~= nil then error("native exchange failed: " .. tostring(process_error)) end
-				if type(result) ~= "table" then error("invalid native exchange process result") end
-				if result.timed_out then
-					error("native exchange timed out")
-				end
-				if type(result.stdout) ~= "string" or #result.stdout > MAX_RESPONSE_BYTES then
+				-- Never log fetch errors or response bodies: SDK diagnostics may contain
+				-- request data. Proxy/redirect/network failures grant no native authority.
+				if fetch_error ~= nil then error("native HTTP exchange failed; delivery is unknown") end
+				if type(result) ~= "table" then error("invalid native HTTP exchange result") end
+				if result.timed_out then error("native HTTP exchange timed out; delivery is unknown") end
+				if result.error ~= nil or result.status == 0 then error("native HTTP exchange failed; delivery is unknown") end
+				if not valid_id(result.status) or result.status < 100 or result.status > 599 then error("invalid native HTTP status") end
+				if result.status ~= 200 then error("native HTTP exchange rejected (HTTP " .. tostring(result.status) .. ")") end
+				if type(result.body) ~= "string" or #result.body > MAX_RESPONSE_BYTES then
 					error("native exchange response is too large")
 				end
-				local decoded, response = pcall(tern.json.decode, result.stdout)
-				if not decoded or type(response) ~= "table" then
-					error("native exchange failed: " .. tostring(result.stderr):sub(1, 240))
-				end
+				if not current_endpoint(data, response_cx) then return end
+				local decoded, response = pcall(tern.json.decode, result.body)
+				if not decoded or type(response) ~= "table" then error("invalid native HTTP exchange JSON") end
 				local host_replies = validate_response(response, data)
-				if type(response.instance_id) == "string" and response.instance_id ~= ""
-					and data.instance_id ~= nil and response.instance_id ~= data.instance_id then
-					-- A daemon restart invalidates reports and all old source identities.
+				if response.instance_id ~= endpoint.instance_id then
 					reset_identity()
 					if neutral_executable(connection.executable) then route_repair_required = true end
-					show_error(response_cx, "desktop pet restarted; pending replies have unknown delivery")
+					show_error(response_cx, "native HTTP endpoint instance changed; pending replies have unknown delivery")
 					return
 				end
 				if response.ok == false and type(response.instance_id) == "string" and response.instance_id ~= "" then
@@ -1156,8 +1277,8 @@ exchange = function(cx)
 						error("desktop pet could not confirm a previous command result")
 					end
 				end
-				if result.status ~= 0 or response.ok ~= true then
-					error(type(response.error) == "string" and response.error or "native exchange rejected")
+				if response.ok ~= true then
+					error("native exchange rejected")
 				end
 				instance_id = response.instance_id
 				local local_reply = host_replies[data.local_host]
@@ -1207,6 +1328,9 @@ exchange = function(cx)
 				finish_exchange(data)
 			end
 			end)
+		end)
+		end)
+		if not started then error("native HTTP exchange could not start; delivery is unknown") end
 		end)
 		end)
 		end)

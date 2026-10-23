@@ -31,6 +31,10 @@ return function(shared)
 			and a.config_dir == b.config_dir and a.state_dir == b.state_dir
 	end
 
+	local function same_paths(a, b)
+		return a.config_dir == b.config_dir and a.state_dir == b.state_dir
+	end
+
 	local function host_inventory(request, id)
 		for _, host in ipairs(request.body.hosts) do
 			if host.host == (id or "0") then return host end
@@ -41,7 +45,7 @@ return function(shared)
 	local function fixture(entry, real, initial)
 		local f = { clock = 1000, requests = {}, asks = {}, gets = {}, prompts = {}, writes = {}, logs = {}, toasts = {},
 			stages = {}, setup_requests = {}, setup_pending = {}, inventory_reads = {}, callback_samples = {}, disabled_hooks = 0,
-			missing_executables = {}, missing_invocations = {}, load_reads = {},
+			missing_executables = {}, missing_invocations = {}, load_reads = {}, endpoint_reads = {}, selected_profiles = {}, process_launches = {},
 			handover_requests = {}, handover_pending = {}, bound_windows = {}, issued_handovers = {}, handover_receipts = {},
 			events = {}, native_generations = { ["0"] = 7, ["1"] = 11 } }
 		local function clone(value)
@@ -65,6 +69,11 @@ return function(shared)
 			return { operation_id = string.rep("d", 32), plan_path = "/approved/migration-plan.json",
 				plan_sha256 = string.rep("b", 64), token = string.rep("c", 64),
 				consumer_revision = string.rep("a", 40), target_instance_id = self.native_instance or "daemon-a" }
+		end
+		function f:descriptor(connection)
+			return { version = 1, instance_id = self.native_instance or "daemon-a",
+				config_dir = connection.config_dir, state_dir = connection.state_dir,
+				url = "http://127.0.0.1:43127/extension", token = self.server_token or string.rep("a", 64) }
 		end
 		local function fresh_context()
 			local live = true
@@ -145,7 +154,7 @@ return function(shared)
 			if self.budget_ms and self.callback_cost > self.budget_ms then
 				self.disabled_hooks += 1
 				if origin == "poll timer" or origin == "inventory timer" then self.timers_disabled = true
-				elseif origin == "inventory microtask" or origin == "process completion"
+				elseif origin == "inventory microtask" or origin == "HTTP completion"
 					or origin == "prompt completion" or origin == "delayed setup" then self.awaits_disabled = true end
 			end
 			expect(ok, tostring(err))
@@ -173,7 +182,7 @@ return function(shared)
 				f.clock += 1
 				return f.clock
 			end,
-			getenv = function(key) return key == "HOME" and "/home/test" or nil end,
+			getenv = function(key) return (f.environment or {})[key] or (key == "HOME" and "/home/test" or nil) end,
 			log = { warn = function(message) table.insert(f.logs, message) end },
 			kv = {
 				get = function(key)
@@ -209,23 +218,46 @@ return function(shared)
 			end,
 			on = function(event, callback) events[event] = callback end,
 			command = function(definition) commands[definition.id] = definition.run end,
+			fs = { read = function(path, max_bytes)
+				if initializing then table.insert(f.load_reads, "endpoint") end
+				table.insert(f.endpoint_reads, { path = path, max_bytes = max_bytes })
+				expect(max_bytes == 4096, "endpoint read was not bounded independently of JSON response limits")
+				if f.endpoint_error then error("injected inaccessible or nonregular endpoint") end
+				local state_dir = path:match("^(.*)/extension%-http%.json$")
+				local connection = state_dir and f.selected_profiles[state_dir]
+				expect(connection ~= nil, "endpoint discovery escaped verified profile selection")
+				local endpoint = f.endpoint or f:descriptor(connection)
+				if f.endpoint_edit then f.endpoint_edit(endpoint) end
+				local bytes = f.endpoint_bytes or real.json.encode(endpoint)
+				if #bytes > max_bytes then error("endpoint exceeds bounded read") end
+				if f.endpoint_read_hook then f.endpoint_read_hook() end
+				return bytes
+			end },
+			fetch = function(url, options)
+				if initializing then table.insert(f.load_reads, "HTTP") end
+				if f.fetch_start_error then error("injected fetch registration failure containing private data") end
+				expect(options.method == "POST" and options.headers["Content-Type"] == "application/json", "exchange did not use extension POST JSON semantics")
+				expect(#options.body <= 256 * 1024, "request exceeded its independent JSON cap")
+				local body = real.json.decode(options.body)
+				local selected = f.endpoint_reads[#f.endpoint_reads]
+				local state_dir = selected.path:match("^(.*)/extension%-http%.json$")
+				local profile = f.selected_profiles[state_dir]
+				local connection = { config_dir = profile.config_dir, state_dir = profile.state_dir }
+				local request = { url = url, options = options, body = body, connection = connection, at_ms = f.clock,
+					authenticated = options.headers.Authorization == "Bearer " .. (f.server_token or string.rep("a", 64)) }
+				expect(body.version == 2 and type(body.hosts) == "table" and body.agents == nil and body.generation == nil,
+					"exchange did not preserve host-based v2")
+				table.insert(f.requests, request)
+				return { next = function(_, callback) request.callback = callback end }
+			end,
 			process = { run = function(argv, options, callback)
 				if initializing then table.insert(f.load_reads, "process") end
+				table.insert(f.process_launches, { argv = argv, options = options })
 				if f.missing_executables[argv[1]] then
 					table.insert(f.missing_invocations, argv[1])
 					error("injected missing executable: " .. argv[1])
 				end
-				if argv[2] == "tern-exchange" then
-					expect(callback == nil, "exchange did not use the real process awaitable API")
-					expect(#options.stdin <= 256 * 1024, "request exceeded its independent JSON cap")
-					expect(options.env.DESKTOP_PET_CONFIG_DIR == argv[4] and options.env.DESKTOP_PET_STATE_DIR == argv[6], "neutral environment disagrees with explicit profile")
-					expect(options.env.HERDR_PLUGIN_CONFIG_DIR == nil, "consumer injected old Herdr profile authority")
-					local request = { argv = argv, options = options, body = real.json.decode(options.stdin), at_ms = f.clock }
-					expect(request.body.version == 2 and type(request.body.hosts) == "table"
-						and request.body.agents == nil and request.body.generation == nil, "exchange did not cut over to host-based v2")
-					table.insert(f.requests, request)
-					return { next = function(_, next_callback) request.callback = next_callback end }
-				end
+				expect(argv[2] ~= "tern-exchange", "regular inventory exchange launched a subprocess")
 				if argv[2] == "migration-integration-handover" then
 					expect(options.env.DESKTOP_PET_CONFIG_DIR == argv[4] and options.env.DESKTOP_PET_STATE_DIR == argv[6],
 						"handover mixed profile environment and arguments")
@@ -237,7 +269,8 @@ return function(shared)
 						local function complete(_, _err, cx)
 							local binding = f.bound_windows[request.body.window_id]
 							local issued = f.issued_handovers[request.body.handover.token]
-							local valid = binding ~= nil and binding.result_free and binding.executable == argv[1]
+							local valid = binding ~= nil and binding.result_free
+								and request.body.target.executable == argv[1]
 								and binding.config_dir == argv[4] and binding.state_dir == argv[6]
 								and (f.native_instance == nil or f.native_instance == binding.instance_id)
 								and issued ~= nil and type(f.kv.connection) == "table" and same_profile(f.kv.connection, request.body.target)
@@ -297,6 +330,8 @@ return function(shared)
 							expect(argv[2] == "profile" and argv[3] == "show" and argv[4] == "--json", "unsupported setup command")
 							stage = "profile"
 							value = real.json.encode({ version = 1, config_dir = argv[6] or "/config/default", state_dir = argv[8] or "/state/default" })
+							f.selected_profiles[argv[8] or "/state/default"] = { version = 1, executable = argv[1],
+								config_dir = argv[6] or "/config/default", state_dir = argv[8] or "/state/default" }
 							if argv[6] then
 								expect(options.env.DESKTOP_PET_CONFIG_DIR == argv[6] and options.env.DESKTOP_PET_STATE_DIR == argv[8], "profile proof env/args mismatch")
 							end
@@ -323,6 +358,7 @@ return function(shared)
 				end }
 			end },
 		}
+		f.api = api
 		stage("production entry")
 		entry(api)
 		initializing = false
@@ -422,18 +458,21 @@ return function(shared)
 		function f:deliver(request, response, options)
 			options = options or {}
 			if self.awaits_disabled then return end
-			-- The native helper encodes before completion; don't charge fixture-side
+			-- The HTTP server encodes before completion; don't charge fixture-side
 			-- encoding and production decoding to the same real callback.
-			local stdout = options.stdout or encode_fixture(real, response, "encode helper stdout") .. "\n"
-			if response.ok == true and request.body.instance_id == response.instance_id then
+			local body = options.body or encode_fixture(real, response, "encode HTTP body") .. "\n"
+			if request.authenticated and not options.error and not options.fetch_error and not options.timed_out
+				and (options.status == nil or options.status == 200)
+				and response.ok == true and request.body.instance_id == response.instance_id then
 				self.bound_windows[request.body.window] = { instance_id = response.instance_id,
-					executable = request.argv[1], config_dir = request.argv[4], state_dir = request.argv[6],
+					config_dir = request.connection.config_dir, state_dir = request.connection.state_dir,
 					epoch = request.body.epoch, sequence = request.body.sequence, result_free = #request.body.results == 0 }
 			end
 			self:invoke(function(cx)
-				request.callback({ status = options.status or 0, timed_out = options.timed_out or false,
-					stdout = stdout, stderr = "injected helper" }, options.process_error, cx)
-			end, "process completion")
+				request.callback({ status = request.authenticated and (options.status or 200) or 401,
+					timed_out = options.timed_out or false, body = body, headers = {},
+					error = options.error }, options.fetch_error, cx)
+			end, "HTTP completion")
 			self:drain()
 		end
 		function f:response(request, command, daemon)
@@ -442,7 +481,7 @@ return function(shared)
 				table.insert(hosts, { host = snapshot.host, observation_generation = snapshot.observation_generation,
 					generation = self.native_generations[snapshot.host] or 13, error = real.json.null })
 			end
-			return { ok = true, instance_id = daemon or "daemon-a", hosts = hosts,
+			return { ok = true, instance_id = daemon or self.native_instance or "daemon-a", hosts = hosts,
 				command = command or real.json.null, error = real.json.null }
 		end
 		function f:ok(request, command, daemon)
@@ -450,7 +489,7 @@ return function(shared)
 		end
 		function f:reject(request, code, daemon, message)
 			self:deliver(request, { ok = false, instance_id = daemon or "daemon-a", hosts = real.json.array(),
-				command = real.json.null, error_code = code, error = message or "diagnostic wording is not a protocol" }, { status = 1 })
+				command = real.json.null, error_code = code, error = message or "diagnostic wording is not a protocol" })
 		end
 		function f:bind()
 			local request = self:poll()
@@ -489,6 +528,7 @@ return function(shared)
 		expect = expect,
 		profile = profile,
 		same_profile = same_profile,
+		same_paths = same_paths,
 		host_inventory = host_inventory,
 		fixture = fixture,
 		unchanged_source = unchanged_source,
