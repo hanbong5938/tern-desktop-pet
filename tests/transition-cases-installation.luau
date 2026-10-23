@@ -216,10 +216,13 @@ return function(shared)
 
 	case("handover waits until an uncertain receipt is consumed by a result-free bound snapshot", function(f)
 		f.kv.connection = approved_route().target; f.handover_protocol = 1; f.migration_available = true
-		f:bind(); f:offer()
+		f:bind(); f:ok(f:poll())
+		-- Age the route-probe interval before creating the uncertain receipt:
+		-- the next poll should query proof without expiring that new exchange.
+		f.clock += 8000; f:offer()
 		local receipt = f.requests[#f.requests]
 		expect(#receipt.body.results == 1 and #f.asks == 1, "fixture lacks a real pending report")
-		f.handover_available = true; f.clock += 10000
+		f.handover_available = true
 		expect(f:poll() == receipt, "route proof polling replaced the pending exchange")
 		f:ok(receipt)
 		expect(#f.handover_requests == 0, "report-bearing snapshot substituted for result-free handover evidence")

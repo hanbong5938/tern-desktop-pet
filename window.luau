@@ -8,6 +8,8 @@ local MAX_RESPONSE_BYTES = 512 * 1024
 local MAX_FIELD_BYTES = 4096
 local INTERVAL_MS = 1200
 local PROCESS_TIMEOUT_MS = 2600
+local EXCHANGE_TIMEOUT_MS = 10000
+local INVENTORY_CHUNK = 32
 local ERROR_REPEAT_MS = 30000
 local MAX_SAFE_ID = 9007199254740991
 local NULL = tern.json.null
@@ -16,10 +18,11 @@ local function valid_id(id)
 	return type(id) == "number" and id >= 0 and id <= MAX_SAFE_ID and id % 1 == 0
 end
 
-local function is_array(value)
+local function is_array(value, checkpoint)
 	if type(value) ~= "table" then return false end
 	local length, count = #value, 0
 	for index in pairs(value) do
+		if checkpoint ~= nil then checkpoint() end
 		if not valid_id(index) or index < 1 or index > length then return false end
 		count += 1
 	end
@@ -67,7 +70,6 @@ local observed_hosts = {}
 local native_generations = {}
 local local_identity = nil
 local results_identity = nil
-local busy = false
 local results = nil
 local active_exchange = nil
 local last_error = nil
@@ -401,9 +403,9 @@ local function resolve_migration(connection, cx, current, ready, failed)
 	end, failed)
 end
 
-local function build_inventory(hosts, panes, tabs, sessions, agents)
-	if not is_array(hosts) or not is_array(panes) or not is_array(tabs)
-		or not is_array(sessions) or not is_array(agents) then
+local function build_inventory(hosts, panes, tabs, sessions, agents, checkpoint)
+	if not is_array(hosts, checkpoint) or not is_array(panes, checkpoint) or not is_array(tabs, checkpoint)
+		or not is_array(sessions, checkpoint) or not is_array(agents, checkpoint) then
 		error("Tern agent inventory is unavailable")
 	end
 	if #hosts > MAX_HOSTS then error("Tern host inventory exceeds the exchange limit") end
@@ -415,6 +417,7 @@ local function build_inventory(hosts, panes, tabs, sessions, agents)
 		first_error = first_error or ("Tern host " .. record.snapshot.label .. " inventory unavailable: " .. message)
 	end
 	for _, host in ipairs(hosts) do
+		checkpoint()
 		if type(host) ~= "table" or (host.kind ~= "local" and host.kind ~= "remote") then
 			error("Tern returned invalid host identity or locality")
 		end
@@ -442,10 +445,11 @@ local function build_inventory(hosts, panes, tabs, sessions, agents)
 		if host.address ~= nil and (type(host.address) ~= "string" or #host.address > MAX_FIELD_BYTES) then
 			error("Tern returned invalid host address")
 		end
-		if not is_array(host.panes) then
+		if not is_array(host.panes, checkpoint) then
 			unavailable(record, "host pane membership is unavailable")
 		else
 			for _, id in ipairs(host.panes) do
+				checkpoint()
 				if not valid_id(id) then
 					unavailable(record, "invalid host pane membership")
 				else
@@ -467,6 +471,7 @@ local function build_inventory(hosts, panes, tabs, sessions, agents)
 	if local_hosts ~= 1 then error("expected exactly one local Tern host") end
 	local pane_info = {}
 	for _, pane in ipairs(panes) do
+		checkpoint()
 		if type(pane) ~= "table" then error("Tern returned invalid pane metadata") end
 		local key = id_string(pane.pane)
 		if pane_info[key] ~= nil then
@@ -478,27 +483,31 @@ local function build_inventory(hosts, panes, tabs, sessions, agents)
 	end
 	local tab_info = {}
 	for _, tab in ipairs(tabs) do
+		checkpoint()
 		if type(tab) ~= "table" then error("Tern returned invalid tab metadata") end
 		local key = id_string(tab.id)
 		tab_info[key] = tab_info[key] == nil and tab or false
 	end
 	local tab_session, session_tabs = {}, {}
 	for _, session in ipairs(sessions) do
+		checkpoint()
 		if type(session) ~= "table" then error("Tern returned invalid session metadata") end
 		local sid = id_string(session.id)
 		local previous = session_tabs[sid]
 		if previous ~= nil then
-			for _, key in ipairs(previous) do tab_session[key] = false end
+			for _, key in ipairs(previous) do checkpoint(); tab_session[key] = false end
 		end
 		local keys = {}
-		local complete = is_array(session.tabs)
+		local complete = is_array(session.tabs, checkpoint)
 		if complete then
 			for _, tid in ipairs(session.tabs) do
+				checkpoint()
 				if valid_id(tid) then table.insert(keys, id_string(tid))
 				else complete = false end
 			end
 		end
 		for _, key in ipairs(keys) do
+			checkpoint()
 			if not complete or previous ~= nil or tab_session[key] ~= nil then
 				tab_session[key] = false
 			else
@@ -508,6 +517,7 @@ local function build_inventory(hosts, panes, tabs, sessions, agents)
 		session_tabs[sid] = previous or keys
 	end
 	for _, agent in ipairs(agents) do
+		checkpoint()
 		if type(agent) ~= "table" then error("Tern returned invalid agent metadata") end
 		local key = id_string(agent.pane)
 		local record = pane_host[key]
@@ -516,6 +526,7 @@ local function build_inventory(hosts, panes, tabs, sessions, agents)
 			-- remains remote; never assign an orphan to the local host.
 			local known = false
 			for host, previous in pairs(observed_hosts) do
+				checkpoint()
 				if previous.panes[key] then
 					known = true
 					if records[host] ~= nil then unavailable(records[host], "agent pane disappeared during inventory") end
@@ -561,6 +572,7 @@ local function build_inventory(hosts, panes, tabs, sessions, agents)
 	-- Validate all generations before committing high-water marks. A failed
 	-- whole inventory cannot masquerade as a successfully observed loss.
 	for _, snapshot in ipairs(inventory) do
+		checkpoint()
 		local record, previous = records[snapshot.host], observed_hosts[snapshot.host]
 		local generation = previous ~= nil and previous.generation or 1
 		if previous ~= nil and (previous.kind ~= record.kind or previous.address ~= record.address
@@ -572,16 +584,18 @@ local function build_inventory(hosts, panes, tabs, sessions, agents)
 		if snapshot.status ~= "available" then snapshot.agents = tern.json.array() end
 	end
 	for host, previous in pairs(observed_hosts) do
+		checkpoint()
 		if records[host] == nil then previous.available = false end
 	end
 	local reply_by_pane, current_local = {}, nil
 	for _, snapshot in ipairs(inventory) do
+		checkpoint()
 		local record = records[snapshot.host]
 		local previous = observed_hosts[snapshot.host]
 		local known_panes = record.panes
 		if snapshot.status ~= "available" and previous ~= nil then
 			known_panes = previous.panes
-			for pane in pairs(record.panes) do known_panes[pane] = true end
+			for pane in pairs(record.panes) do checkpoint(); known_panes[pane] = true end
 		end
 		observed_hosts[snapshot.host] = { generation = snapshot.observation_generation,
 			kind = record.kind, address = record.address, panes = known_panes,
@@ -591,6 +605,7 @@ local function build_inventory(hosts, panes, tabs, sessions, agents)
 				available = snapshot.status == "available" }
 			if snapshot.status == "available" then
 				for _, row in ipairs(snapshot.agents) do
+					checkpoint()
 					reply_by_pane[row.pane] = { id = tonumber(row.pane), row = row,
 						host = snapshot.host, observation_generation = snapshot.observation_generation,
 						is_local = true, connected = true }
@@ -614,6 +629,44 @@ local function same_target(a, b)
 		and a.row.title == b.row.title and a.row.cwd == b.row.cwd
 end
 
+-- Inventory assembly yields. Re-read the selected pane and its session in the
+-- delivery callback so a move, park or rename cannot pass using captured rows.
+-- This is intentionally synchronous with ask, not another inventory stage.
+local function same_live_pane(cx, target)
+	local pane = cx.session:pane(target.id)
+	if type(pane) ~= "table" or pane.pane ~= target.id or pane.title ~= target.row.title
+		or optional_id(pane.tab) ~= target.row.tab_id then
+		return false
+	end
+	if pane.tab == nil then return target.row.session_id == NULL end
+	local sessions = cx.session:sessions()
+	if not is_array(sessions) then return false end
+	local owners, matching_sessions = 0, 0
+	local session_id = tonumber(target.row.session_id)
+	for _, session in ipairs(sessions) do
+		if type(session) ~= "table" or not valid_id(session.id) then
+			return false
+		end
+		local selected_session = session.id == session_id
+		if selected_session then matching_sessions += 1 end
+		if not is_array(session.tabs) then
+			if selected_session then return false end
+		else
+			local complete, matches = true, 0
+			for _, tab in ipairs(session.tabs) do
+				if not valid_id(tab) then complete = false
+				elseif tab == pane.tab then matches += 1 end
+			end
+			-- Keep unrelated host metadata failures isolated, as build_inventory does.
+			if matches > 0 then
+				if not selected_session or not complete then return false end
+				owners += matches
+			end
+		end
+	end
+	return owners == 1 and matching_sessions == 1
+end
+
 local function reset_identity()
 	incarnation += 1
 	window, epoch = new_identity()
@@ -624,7 +677,6 @@ local function reset_identity()
 	local_identity = nil
 	results_identity = nil
 	results = tern.json.array()
-	busy = false
 	active_exchange = nil
 	last_error = nil
 	setup_pending = nil
@@ -654,95 +706,104 @@ end
 local function finish_exchange(data)
 	if data.incarnation == incarnation and active_exchange == data then
 		active_exchange = nil
-		busy = false
 	end
 end
 
-local function current_exchange(data, cx)
-	if data.incarnation ~= incarnation or active_exchange ~= data then
-		return false
+
+-- A continuation can be silently dropped when Tern disables a callback hook.
+-- The next viable trigger retires the entire source, including uncertain asks;
+-- it never retries an offered command or admits a late completion.
+local function expire_exchange()
+	if active_exchange ~= nil and tern.now() >= active_exchange.deadline then
+		tern.log.warn("Desktop pet: Tern exchange deadline expired; retired the source without replaying pending replies. If Tern disabled a callback hook, reload the plugin to create a fresh VM; Connect cannot re-enable host-disabled hooks.")
+		reset_identity()
+		return true
 	end
-	local loaded, connection = pcall(refresh_connection)
-	if data.incarnation ~= incarnation or active_exchange ~= data then
-		return false
-	end
-	if not loaded then
-		finish_exchange(data)
-		show_error(cx, tostring(connection))
-		return false
-	end
-	return true
+	return false
+end
+local function current_exchange(data, _cx)
+	if data.incarnation ~= incarnation or active_exchange ~= data then return false end
+	return not expire_exchange()
 end
 
--- Inventory calls synchronously cross to the window thread. Zero-delay
--- awaitables split that work without the coarse timer's scheduling delay.
--- Keep the potentially large agent payload separate; membership and panes last.
-local function collect_inventory(data, cx, ready, failed)
-	local tabs, sessions, agents
-	local stage = 0
-	local phase = data.phase
+
+-- Each continuation owns one ticket and a fresh context. KV/profile validation
+-- is a separate callback from SDK reads, CPU chunks, encoding and process start.
+-- This cannot revive a hook disabled by Tern; the deadline still releases its
+-- ownership on the next viable trigger (or explicit Connect).
+local function continue_exchange(data, cx, work, failed, checked)
+	if not current_exchange(data, cx) then return end
+	data.ticket = (data.ticket or 0) + 1
+	local ticket = data.ticket
 	local function fail(fresh_cx, message)
-		if not current_exchange(data, fresh_cx) then
-			return
-		end
-		local reported, report_error = pcall(function()
-			if failed ~= nil then
-				failed(fresh_cx, tostring(message))
-			else
-				show_error(fresh_cx, tostring(message))
-			end
-		end)
-		finish_exchange(data)
-		if not reported then
-			show_error(fresh_cx, tostring(report_error))
-		end
-	end
-	local function step(_value, err, fresh_cx)
-		if data.phase ~= phase then
-			return
-		end
-		local ok, message = pcall(function()
-			if not current_exchange(data, fresh_cx) then
-				return
-			end
-			if err ~= nil then
-				error("Tern inventory continuation failed: " .. tostring(err))
-			end
-			if fresh_cx == nil then
-				finish_exchange(data)
-				return
-			end
-			stage += 1
-			if stage == 1 then
-				tabs = fresh_cx.session:tabs()
-			elseif stage == 2 then
-				sessions = fresh_cx.session:sessions()
-			elseif stage == 3 then
-				agents = fresh_cx.agents:list()
-			else
-				local hosts = fresh_cx.hosts:list()
-				local panes = fresh_cx.session:panes()
-				if not current_exchange(data, fresh_cx) then
-					return
-				end
-				local inventory, reply_by_pane, inventory_error = build_inventory(hosts, panes, tabs, sessions, agents)
-				ready(fresh_cx, inventory, reply_by_pane, inventory_error)
-				return
-			end
-			if data.incarnation == incarnation and active_exchange == data then
-				tern.sleep(0):next(step)
-			end
-		end)
-		if not ok then
-			fail(fresh_cx, message)
-		end
+		if not current_exchange(data, fresh_cx) then return end
+		if failed ~= nil then failed(fresh_cx, tostring(message))
+		else finish_exchange(data); show_error(fresh_cx, tostring(message)) end
 	end
 	local scheduled, message = pcall(function()
-		tern.sleep(0):next(step)
+		tern.sleep(0):next(function(_, err, fresh_cx)
+			if data.ticket ~= ticket or not current_exchange(data, fresh_cx) then return end
+			data.ticket += 1 -- consume before any user/SDK work; duplicate delivery is inert
+			local ok, failure = pcall(function()
+				if err ~= nil then error("Tern continuation failed: " .. tostring(err)) end
+				if fresh_cx == nil then finish_exchange(data); return end
+				if not checked then
+					refresh_connection()
+					if current_exchange(data, fresh_cx) then
+						continue_exchange(data, fresh_cx, work, failed, true)
+					end
+				else
+					work(fresh_cx)
+				end
+			end)
+			if not ok then fail(fresh_cx, failure) end
+		end)
 	end)
-	if not scheduled then
-		fail(cx, message)
+	if not scheduled then fail(cx, message) end
+end
+
+local function collect_inventory(data, cx, ready, failed)
+	local tabs, sessions, agents, hosts, panes
+	local stage, chunks = 0, 0
+	local inventory, reply_by_pane, inventory_error
+	local function checkpoint()
+		chunks += 1
+		if chunks >= INVENTORY_CHUNK then
+			chunks = 0
+			coroutine.yield()
+		end
 	end
+	local builder = coroutine.create(function()
+		return build_inventory(hosts, panes, tabs, sessions, agents, checkpoint)
+	end)
+	local function fail(fresh_cx, message)
+		if failed ~= nil then failed(fresh_cx, message)
+		else show_error(fresh_cx, message) end
+		finish_exchange(data)
+	end
+	local step
+	step = function(fresh_cx)
+		stage += 1
+		if stage == 1 then tabs = fresh_cx.session:tabs()
+		elseif stage == 2 then sessions = fresh_cx.session:sessions()
+		elseif stage == 3 then agents = fresh_cx.agents:list()
+		elseif stage == 4 then hosts = fresh_cx.hosts:list()
+		elseif stage == 5 then panes = fresh_cx.session:panes()
+		elseif stage == 6 then
+			local ok, first, second, third = coroutine.resume(builder)
+			if not ok then error(first) end
+			if coroutine.status(builder) ~= "dead" then
+				stage -= 1
+			else
+				inventory, reply_by_pane, inventory_error = first, second, third
+			end
+		else
+			ready(fresh_cx, inventory, reply_by_pane, inventory_error)
+			return
+		end
+		continue_exchange(data, fresh_cx, step, fail)
+	end
+	continue_exchange(data, cx, step, fail)
 end
 
 local exchange, save_connection
@@ -782,12 +843,17 @@ local function revalidate_command(data, command, cx)
 	end
 	data.phase = "revalidate"
 	collect_inventory(data, cx, function(fresh_cx, _hosts, fresh)
+		-- Profile validation and semantic delivery must share a callback: another
+		-- window may have changed shared KV since the preceding continuation.
+		refresh_connection()
+		if not current_exchange(data, fresh_cx) then return end
 		local current = fresh[command.pane]
 		local accepted = false
 		if type(fresh_cx.agents.ask) ~= "function" then
 			failure = "this Tern window does not support semantic agent asks"
 		elseif same_target(target, current) and current.row.state ~= "exited"
-			and current.row.delivery_error == NULL then
+			and current.row.delivery_error == NULL and same_live_pane(fresh_cx, current)
+			and current_exchange(data, fresh_cx) then
 			local ask_ok, ask_error = pcall(function()
 				fresh_cx.agents:get(current.id)
 				fresh_cx.agents:ask(current.id, command.text)
@@ -985,23 +1051,18 @@ exchange = function(cx)
 	if cx == nil then
 		return
 	end
-	-- Other windows share KV. Detect a whole-profile change even while old work
-	-- is busy, so neither its snapshot nor its command can enter the new profile.
-	local loaded, connection = pcall(refresh_connection)
-	if not loaded then
-		active_exchange = nil
-		busy = false
-		show_error(cx, tostring(connection))
-		return
-	end
-	if busy then
-		return
-	end
-	local data = { incarnation = incarnation, instance_id = instance_id, phase = "inventory" }
-	-- Inventory is already work: event bursts must not start another collection.
-	busy = true
+	-- Timer/event triggers do no shared-KV or inventory work. If a continuation
+	-- vanished, retire its source before reserving a fresh asynchronous exchange.
+	local expired = expire_exchange()
+	if active_exchange ~= nil then return end
+	local connection = active_connection
+	local data = { incarnation = incarnation, instance_id = instance_id, phase = "inventory",
+		deadline = tern.now() + EXCHANGE_TIMEOUT_MS }
 	active_exchange = data
 	collect_inventory(data, cx, function(fresh_cx, hosts, reply_by_pane, inventory_error)
+		if expired then
+			show_error(fresh_cx, "Tern exchange stopped making progress; reconnected with a fresh source. Pending replies have unknown delivery")
+		end
 		if sequence >= MAX_SAFE_ID then
 			error("desktop pet sequence is exhausted")
 		end
@@ -1019,6 +1080,7 @@ exchange = function(cx)
 		data.local_host = local_identity.host
 		data.local_observation_generation = local_identity.observation_generation
 		data.local_generation = native_generations[data.local_host]
+		continue_exchange(data, fresh_cx, function(encode_cx)
 		local request = tern.json.encode({
 			version = 2,
 			kind = "tern",
@@ -1032,6 +1094,10 @@ exchange = function(cx)
 		if #request > MAX_REQUEST_BYTES then
 			error("desktop pet inventory exceeds the exchange limit")
 		end
+		continue_exchange(data, encode_cx, function(_process_cx)
+		-- Route validation is deliberately synchronous at the side-effect boundary.
+		refresh_connection()
+		if not current_exchange(data, _process_cx) then return end
 		local argv = { connection.executable, "tern-exchange", "--config-dir", connection.config_dir,
 			"--state-dir", connection.state_dir }
 		data.phase = "process"
@@ -1047,6 +1113,7 @@ exchange = function(cx)
 			-- Consume this completion before staging a one-shot command. A repeated
 			-- callback cannot schedule another ask while revalidation is pending.
 			data.phase = "response"
+			continue_exchange(data, response_cx, function(response_cx)
 			local succeeded, pending = pcall(function()
 				if process_error ~= nil then error("native exchange failed: " .. tostring(process_error)) end
 				if type(result) ~= "table" then error("invalid native exchange process result") end
@@ -1139,6 +1206,9 @@ exchange = function(cx)
 			elseif not pending then
 				finish_exchange(data)
 			end
+			end)
+		end)
+		end)
 		end)
 	end)
 end
@@ -1206,14 +1276,16 @@ save_connection = function(candidate, validated, cx, current, supports_handover,
 	return true
 end
 
-local function connect(cx)
+local function connect_now(cx)
 	if cx == nil then return end
-	if active_connection ~= nil then pcall(refresh_connection) end
+	if active_connection ~= nil then
+		local loaded = pcall(refresh_connection)
+		if loaded then exchange(cx); return end
+	end
 	local current, storage = setup_guard(cx)
 	if current == nil then return end
 	local loaded, connection = pcall(settings)
 	if not loaded then setup_pending = nil; show_error(cx, tostring(connection) .. "\n" .. INSTALL_ADVICE); return end
-	if active_connection ~= nil and active_storage == storage then setup_pending = nil; exchange(cx); return end
 	local function activate(validated, fresh_cx, supports_handover, handover)
 		if not current(fresh_cx) then return end
 		setup_pending = nil
@@ -1243,6 +1315,23 @@ local function connect(cx)
 	else
 		resolve_connection(connection and connection.executable or nil, connection, cx, current, activate)
 	end
+end
+
+local function connect(cx)
+	if cx == nil then return end
+	expire_exchange()
+	local source, serial = incarnation, setup_serial
+	-- window_start and the startup timer must not synchronously read shared KV
+	-- or start discovery. Use only the continuation's fresh context.
+	local ok, message = pcall(function()
+		tern.sleep(0):next(function(_, err, fresh_cx)
+			if fresh_cx == nil or source ~= incarnation or serial ~= setup_serial then return end
+			if err ~= nil then show_error(fresh_cx, tostring(err)); return end
+			local connected, failure = pcall(connect_now, fresh_cx)
+			if not connected then show_error(fresh_cx, tostring(failure)) end
+		end)
+	end)
+	if not ok then show_error(cx, tostring(message)) end
 end
 
 local function configure(cx)
@@ -1311,8 +1400,7 @@ local function repair_saved_route(cx, quiet)
 	end, failed)
 end
 
-local function tick(cx)
-	timer = tern.timer(INTERVAL_MS, tick)
+local function tick_now(cx)
 	if active_connection ~= nil then
 		local loaded, message = pcall(refresh_connection)
 		if loaded then
@@ -1339,6 +1427,25 @@ local function tick(cx)
 	if not loaded then show_error(cx, tostring(connection)); return end
 	if connection ~= nil and legacy_executable(connection.executable) then connect(cx)
 	elseif route_repair_required then repair_saved_route(cx) end
+end
+
+local function tick(cx)
+	timer = tern.timer(INTERVAL_MS, tick)
+	expire_exchange()
+	local source = incarnation
+	local consumed = false
+	-- Keep shared-KV and approved-route repair work off the timer hook, just
+	-- as observation callbacks keep validation separate from SDK inventory.
+	local scheduled, message = pcall(function()
+		tern.sleep(0):next(function(_, err, fresh_cx)
+			if consumed or fresh_cx == nil or source ~= incarnation then return end
+			consumed = true
+			if err ~= nil then show_error(fresh_cx, tostring(err)); return end
+			local ok, failure = pcall(tick_now, fresh_cx)
+			if not ok then show_error(fresh_cx, tostring(failure)) end
+		end)
+	end)
+	if not scheduled then show_error(cx, tostring(message)) end
 end
 
 -- Startup events and reload's timer share one setup chain. Repeating discovery

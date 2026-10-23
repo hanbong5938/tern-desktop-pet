@@ -614,4 +614,226 @@ return function(shared)
 		expect(#f.asks == 1 and f.asks[1].text == "after cancellation", "normal semantic delivery did not resume after cancellation")
 	end)
 
+	case("dropped inventory continuation expires and late delivery cannot clear newer work", function(f)
+		local bound = f:bind()
+		f:hold(); f:poll(); f:through_inventory("sessions")
+		local dropped = table.remove(f.stages, 1)
+		expect(dropped ~= nil and dropped.microtask, "did not capture a real production continuation")
+		f:release()
+		expect(#f.requests == 1, "partial inventory submitted a request")
+		f.clock += 10001
+		local recovered = f:poll()
+		fresh_source(bound, recovered)
+		expect(#f.requests == 2, "dropped continuation left exchange ownership permanently busy")
+		f:invoke(function(cx) dropped.callback(nil, nil, cx) end, "late inventory continuation")
+		f:connect()
+		expect(#f.requests == 2 and #f.asks == 0, "late continuation released newer exchange or delivered an ask")
+		f:ok(recovered)
+		expect(f:poll().body.instance_id == "daemon-a", "new source failed to resume polling")
+	end)
+
+	case("lost process completion expires without replaying a delayed offered command", function(f)
+		f:bind()
+		local lost = f:poll()
+		f.clock += 10001
+		local recovered = f:poll()
+		fresh_source(lost, recovered)
+		f:ok(lost, { operation_id = "lost-completion", pane = "1", text = "never replay" })
+		f:connect()
+		expect(#f.requests == 3 and #f.asks == 0, "late process completion crossed expired source or cleared newer work")
+		f:ok(recovered)
+		f:offer("new source only", "after-expiry")
+		expect(#f.asks == 1 and f.asks[1].text == "new source only", "recovery did not preserve one-shot delivery")
+	end)
+
+	case("dropped command revalidation retires uncertain operation and never asks on late continuation", function(f)
+		f:bind()
+		local offered = f:poll()
+		f:hold(); f:ok(offered, { operation_id = "lost-revalidation", pane = "1", text = "never replay" })
+		f:through_inventory("agents")
+		local dropped = table.remove(f.stages, 1)
+		expect(dropped ~= nil, "revalidation had no production continuation to drop")
+		f:release()
+		f.clock += 10001
+		local recovered = f:poll()
+		fresh_source(offered, recovered)
+		f:invoke(function(cx) dropped.callback(nil, nil, cx) end, "late revalidation continuation")
+		f:ok(offered, { operation_id = "lost-revalidation", pane = "1", text = "never replay" })
+		f:connect()
+		expect(#f.asks == 0 and #f.requests == 3 and #recovered.body.results == 0,
+			"expired revalidation replayed an ask, fabricated a receipt, or cleared newer work")
+	end)
+
+	case("explicit Connect expires lost work when timer lane is disabled", function(f)
+		f:bind()
+		local lost = f:poll()
+		f.timers_disabled = true
+		f.clock += 10001
+		local recovered = f:connect()
+		fresh_source(lost, recovered)
+		f:ok(lost, { operation_id = "late-timer", pane = "1", text = "never" })
+		f:connect()
+		expect(#f.requests == 3 and #f.asks == 0, "Connect did not fence expired timer-owned work")
+		f:ok(recovered)
+	end)
+
+	case("host-disabled await lane stays disabled and deadline reports reload requirement", function(f)
+		f:bind()
+		local lost = f:poll()
+		local before = #f.requests
+		f.awaits_disabled = true
+		f.clock += 10001
+		f:poll(); f:connect()
+		f:ok(lost, { operation_id = "disabled-await", pane = "1", text = "never" })
+		expect(#f.requests == before and #f.asks == 0 and f.awaits_disabled and not f.timers_disabled,
+			"fixture silently revived a globally disabled await lane")
+		local reported = false
+		for _, message in ipairs(f.logs) do
+			if message:find("reload the plugin", 1, true) then reported = true end
+		end
+		expect(reported, "lost progress concealed the host-level reload requirement")
+	end)
+
+	case("shared KV, SDK inventory and JSON encoding do not accumulate in one observation callback", function(f)
+		f:bind()
+		f.kv_cost_ms, f.inventory_cost_ms, f.json_cost_ms, f.budget_ms = 24, 30, 20, 50
+		local request = f:poll()
+		expect(#request.body.hosts == 2 and #f.requests == 2, "isolated inventory stages did not submit a complete snapshot")
+		f:ok(request)
+		local event_request = f:event("title")
+		expect(#f.requests == 3 and event_request ~= request, "window event failed to schedule a fresh inventory")
+		expect(f.disabled_hooks == 0, "shared KV, inventory or codec work accumulated beyond one callback budget")
+		for _, sample in ipairs(f.callback_samples) do
+			if sample.origin == "poll timer" or sample.origin == "event title" then
+				expect(sample.cost_ms == 0, "timer/event synchronously accessed shared KV or inventory")
+			end
+		end
+	end)
+
+	case("large multi-host inventory completes CPU chunks without omitting host membership", function(f)
+		f:bind()
+		f.inventory = { hosts = {}, panes = {}, tabs = {}, sessions = {}, agents = {} }
+		local count = 0
+		for host_id = 0, 15 do
+			local host = { id = host_id, name = "Host " .. host_id, kind = host_id == 0 and "local" or "remote",
+				state = "connected", panes = {} }
+			table.insert(f.inventory.hosts, host)
+			for index = 1, 32 do
+				count += 1
+				table.insert(host.panes, count)
+				table.insert(f.inventory.panes, { pane = count, title = "agent " .. count })
+				table.insert(f.inventory.agents, { pane = count, cwd = "/work", state = "idle" })
+			end
+		end
+		local request = f:poll()
+		expect(#request.body.hosts == 16 and #f.requests == 2, "large production inventory failed to settle")
+		local total = 0
+		for _, host in ipairs(request.body.hosts) do
+			expect(host.status == "available" and #host.agents == 32, "CPU chunk lost a complete host inventory")
+			total += #host.agents
+		end
+		expect(total == count, "large inventory lost or duplicated agents across chunks")
+		f:ok(request)
+	end)
+
+	case("profile cutover after launch validation blocks old-route process start", function(f)
+		-- Observe the real SDK side-effect boundary once, then change KV immediately
+		-- before that work callback in a second fixture. No source/closure inspection.
+		local baseline = f:fork()
+		baseline:bind(); baseline:hold(); baseline:poll()
+		local steps = 0
+		while #baseline.requests == 1 do
+			expect(baseline:step(), "baseline snapshot stalled before process start")
+			steps += 1
+			expect(steps <= 128, "baseline snapshot did not settle")
+		end
+		f:bind(); f:hold(); f:poll()
+		for _ = 1, steps - 1 do expect(f:step(), "snapshot stalled before launch gap") end
+		expect(#f.requests == 1, "targeted cut was not before process start")
+		f.kv.connection = profile("cutover")
+		f:release()
+		expect(#f.requests == 1 and #f.asks == 0,
+			"profile changed after validation but an old-route process launched")
+	end)
+
+	case("profile cutover after command validation blocks semantic ask", function(f)
+		local command = { operation_id = "boundary-cut", pane = "1", text = "never cross profiles" }
+		local baseline = f:fork()
+		baseline:bind()
+		local offered = baseline:poll()
+		baseline:hold(); baseline:ok(offered, command)
+		local steps = 0
+		while #baseline.asks == 0 do
+			expect(baseline:step(), "baseline command stalled before semantic ask")
+			steps += 1
+			expect(steps <= 128, "baseline command did not settle")
+		end
+		f:bind()
+		offered = f:poll()
+		f:hold(); f:ok(offered, command)
+		for _ = 1, steps - 1 do expect(f:step(), "command stalled before ask gap") end
+		expect(#f.asks == 0, "targeted cut was not before semantic ask")
+		f.kv.connection = profile("cutover")
+		f:release()
+		expect(#f.asks == 0 and #f.requests == 2,
+			"profile changed after validation but semantic ask escaped")
+	end)
+
+	for _, change in ipairs({
+		{ name = "pane moved to another tab and session", apply = function(f)
+			f.inventory.panes[1].tab = 99
+			f.inventory.tabs[1] = { id = 99, name = "new tab" }
+			f.inventory.sessions[1] = { id = 999, name = "new session", tabs = { 99 } }
+		end },
+		{ name = "whole tab moved to another session", apply = function(f)
+			f.inventory.sessions[1] = { id = 999, name = "new session", tabs = { 10 } }
+		end },
+		{ name = "pane parked", apply = function(f)
+			f.inventory.panes[1].tab = nil
+		end },
+		{ name = "pane renamed", apply = function(f)
+			f.inventory.panes[1].title = "replacement"
+		end },
+		{ name = "pane closed", apply = function(f)
+			table.remove(f.inventory.panes, 1)
+		end },
+		{ name = "session membership became ambiguous", apply = function(f)
+			table.insert(f.inventory.sessions[2].tabs, 10)
+		end },
+		{ name = "pane lookup failed", apply = function(f)
+			f.pane_lookup_error = true
+		end },
+	}) do
+		case("final delivery rejects " .. change.name .. " after inventory capture", function(f)
+			f:bind()
+			local offered = f:poll()
+			local command = { operation_id = "after-capture", pane = "1", text = "do not send stale target" }
+			f:hold(); f:ok(offered, command)
+			-- Ignore the preceding observation's final panes read.
+			f.inventory_reads = {}
+			f:through_inventory("panes")
+			change.apply(f)
+			f:release()
+			expect(#f.gets == 0 and #f.asks == 0, "captured identity bypassed final target validation")
+			local receipt = f.requests[#f.requests]
+			expect(#receipt.body.results == 1 and receipt.body.results[1].operation_id == command.operation_id
+				and receipt.body.results[1].status == "failed", "target change did not produce one failed receipt")
+			f:ok(offered, command); f:connect()
+			expect(f.requests[#f.requests] == receipt and #f.asks == 0, "late offer reopened rejected delivery")
+			f:ok(receipt)
+			expect(#f:poll().body.results == 0 and #f.asks == 0, "confirmed rejection replayed a receipt or ask")
+		end)
+	end
+
+	case("unchanged parked pane retains one-shot semantic delivery", function(f)
+		f.inventory.panes[1].tab = nil
+		f:bind()
+		local offered = f:offer("parked target", "parked-once")
+		local receipt = f.requests[#f.requests]
+		expect(#f.asks == 1 and f.asks[1].text == "parked target"
+			and receipt.body.results[1].status == "accepted", "stable parked target was treated as a changed pane")
+		f:ok(offered, { operation_id = "parked-once", pane = "1", text = "parked target" })
+		expect(#f.asks == 1 and f.requests[#f.requests] == receipt, "duplicate offer replayed parked delivery")
+	end)
+
 end

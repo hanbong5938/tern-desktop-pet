@@ -43,7 +43,7 @@ return function(shared)
 			stages = {}, setup_requests = {}, setup_pending = {}, inventory_reads = {}, callback_samples = {}, disabled_hooks = 0,
 			missing_executables = {}, missing_invocations = {}, load_reads = {},
 			handover_requests = {}, handover_pending = {}, bound_windows = {}, issued_handovers = {}, handover_receipts = {},
-			native_generations = { ["0"] = 7, ["1"] = 11 } }
+			events = {}, native_generations = { ["0"] = 7, ["1"] = 11 } }
 		local function clone(value)
 			if value == nil then
 				return nil
@@ -84,6 +84,16 @@ return function(shared)
 			local cx = {
 				hosts = { list = function() return inventory("hosts") end },
 				session = {
+					pane = function(_, id)
+						check()
+						f.callback_cost += f.inventory_cost_ms or 0
+						f.clock += f.inventory_cost_ms or 0
+						if f.pane_lookup_error then error("injected pane lookup failure") end
+						for _, pane in ipairs(f.inventory.panes) do
+							if pane.pane == id then return clone(pane) end
+						end
+						return nil
+					end,
 					panes = function() return inventory("panes") end,
 					tabs = function() return inventory("tabs") end,
 					sessions = function() return inventory("sessions") end,
@@ -134,16 +144,30 @@ return function(shared)
 			-- catch that disablement with pcall around an individual SDK operation.
 			if self.budget_ms and self.callback_cost > self.budget_ms then
 				self.disabled_hooks += 1
-				self.timers_disabled = true
+				if origin == "poll timer" or origin == "inventory timer" then self.timers_disabled = true
+				elseif origin == "inventory microtask" or origin == "process completion"
+					or origin == "prompt completion" or origin == "delayed setup" then self.awaits_disabled = true end
 			end
 			expect(ok, tostring(err))
 			stage("fixture setup/checks")
 		end
 		local initializing = true
 		local commands = {}
-		local events = {}
+		local events = f.events
 		local api = {
-			json = real.json,
+			json = {
+				null = real.json.null, array = real.json.array,
+				encode = function(value)
+					f.callback_cost += f.json_cost_ms or 0
+					f.clock += f.json_cost_ms or 0
+					return real.json.encode(value)
+				end,
+				decode = function(value)
+					f.callback_cost += f.json_cost_ms or 0
+					f.clock += f.json_cost_ms or 0
+					return real.json.decode(value)
+				end,
+			},
 			now = function()
 				if initializing then table.insert(f.load_reads, "clock") end
 				f.clock += 1
@@ -154,6 +178,8 @@ return function(shared)
 			kv = {
 				get = function(key)
 					if initializing then table.insert(f.load_reads, "KV") end
+					f.callback_cost += f.kv_cost_ms or 0
+					f.clock += f.kv_cost_ms or 0
 					if f.read_error then error("injected KV read failure") end
 					return clone(f.kv[key])
 				end,
@@ -302,9 +328,10 @@ return function(shared)
 		initializing = false
 		stage("fixture setup/checks")
 		function f:step()
-			if self.timers_disabled then return false end
+			if self.timers_disabled and self.awaits_disabled then return false end
 			local timer = table.remove(self.stages, 1)
 			if timer == nil then return false end
+			if (timer.microtask and self.awaits_disabled) or (not timer.microtask and self.timers_disabled) then return true end
 			if timer.microtask then
 				self.clock += self.microtask_delay_ms or timer.delay_ms
 				local err = self.microtask_error
@@ -320,7 +347,7 @@ return function(shared)
 			local callbacks = 0
 			while not self.hold_stages and self:step() do
 				callbacks += 1
-				expect(callbacks <= 100, "asynchronous inventory chain did not settle")
+				expect(callbacks <= 10000, "asynchronous inventory chain did not settle")
 			end
 		end
 		function f:hold() self.hold_stages = true end
@@ -330,7 +357,7 @@ return function(shared)
 			while self.inventory_reads[#self.inventory_reads] ~= name do
 				expect(self:step(), "inventory did not reach " .. name)
 				callbacks += 1
-				expect(callbacks <= 100, "inventory boundary did not settle")
+				expect(callbacks <= 10000, "inventory boundary did not settle")
 			end
 		end
 		function f:poll()
@@ -350,6 +377,15 @@ return function(shared)
 		end
 		function f:connect()
 			self:invoke(commands.connect, "connect")
+			self:drain()
+			return self.requests[#self.requests]
+		end
+		function f:event(name)
+			local callback = self.events[name]
+			expect(callback ~= nil, "production did not subscribe to " .. name)
+			self:invoke(function(cx)
+				if name == "window_start" then callback(cx) else callback({}, cx) end
+			end, "event " .. name)
 			self:drain()
 			return self.requests[#self.requests]
 		end
@@ -385,6 +421,7 @@ return function(shared)
 		end
 		function f:deliver(request, response, options)
 			options = options or {}
+			if self.awaits_disabled then return end
 			-- The native helper encodes before completion; don't charge fixture-side
 			-- encoding and production decoding to the same real callback.
 			local stdout = options.stdout or encode_fixture(real, response, "encode helper stdout") .. "\n"
@@ -430,6 +467,9 @@ return function(shared)
 			local count = 0
 			for _, write in ipairs(self.writes) do if write.key == "connection" then count += 1 end end
 			return count
+		end
+		function f:fork()
+			return fixture(entry, real)
 		end
 		return f
 	end
