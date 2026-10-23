@@ -8,7 +8,7 @@ This window plugin connects Tern agent observations and semantic asks to the sep
 
 [App homepage](https://hanbong5938.github.io/desktop-pet/en/) · [Core installation / profiles](https://github.com/hanbong5938/desktop-pet/blob/main/docs/development.md) · [Current usage](https://github.com/hanbong5938/desktop-pet/blob/main/docs/usage.md) · [Core Wiki](https://github.com/hanbong5938/desktop-pet/wiki) · [Legacy migration](https://github.com/hanbong5938/desktop-pet/blob/main/docs/migrations/desktop-pet.md). These are core-owned destination links, not hosted-publication or real reconnect evidence.
 
-**Beta status:** this testing-only prerelease requires [Desktop Pet v0.4.17-beta.10](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.17-beta.10), which pins this consumer and provides its authenticated loopback extension transport. Regular exchange uses `tern.fetch` instead of launching `tern-exchange` on every poll. Signed installation/profile discovery and approved handover commands remain subprocesses; there is no subprocess exchange fallback. Stable/default channels are unchanged. The production source passed **272/272** controlled-boundary regressions in Tern 0.9.5's actual isolated Luau VM, including daemon restart, uncertain receipts, proxy confidentiality and final profile-change fencing. A separate real-SDK HTTP smoke completed 32 authenticated sequential requests; this is not proof of live user-session continuity, real agent/model delivery or physical GUI acceptance.
+**Beta status:** this testing-only prerelease is paired with [Desktop Pet v0.4.17-beta.11](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.17-beta.11), which pins this consumer and provides its authenticated loopback extension transport. The beta.10 source tag introduced the transport, but its artifact workflow was cancelled before publication so canonical-owner CLI replacement could be completed in beta.11. Regular exchange uses `tern.fetch` instead of launching `tern-exchange` on every poll. Signed installation/profile discovery and approved handover commands remain subprocesses; there is no subprocess exchange fallback. Stable/default channels are unchanged. The production source passed **272/272** controlled-boundary regressions in Tern 0.9.5's actual isolated Luau VM, including daemon restart, uncertain receipts, proxy confidentiality and final profile-change fencing. A separate real-SDK HTTP smoke completed 32 authenticated sequential requests; this is not proof of live user-session continuity, real agent/model delivery or physical GUI acceptance.
 
 ### Core beta.6 adapter compatibility merge
 
@@ -16,7 +16,7 @@ The source compatibility branch combines `work/authority-deadline-021` (`7276c1b
 
 The beta preserves existing source commits and the compatibility baseline's authority checks. Its supported-window regression result is recorded below; published-byte installation, authenticated reconnect and physical GUI acceptance require their own runtime evidence.
 
-For this beta, install the checksum-verified Core beta.10 app first, then install its signed, pinned consumer package from the verified canonical installation:
+For this beta, install the checksum-verified Core beta.11 app first, then install its signed, pinned consumer package from the verified canonical installation:
 
 ```sh
 tern plugin install "$HOME/.local/share/desktop-pet/libexec/DesktopPet.app/Contents/Resources/integrations/tern-desktop-pet" --force

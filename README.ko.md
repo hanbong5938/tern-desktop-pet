@@ -8,7 +8,7 @@
 
 [앱 홈페이지](https://hanbong5938.github.io/desktop-pet/) · [Core 설치·프로필](https://github.com/hanbong5938/desktop-pet/blob/main/docs/development.ko.md) · [현재 앱 사용법](https://github.com/hanbong5938/desktop-pet/blob/main/docs/usage.ko.md) · [Core Wiki](https://github.com/hanbong5938/desktop-pet/wiki) · [기존 설치 이전](https://github.com/hanbong5938/desktop-pet/blob/main/docs/migrations/desktop-pet.md). 링크는 core 소유의 목적지이며 실제 공개 배포·재연결 증거가 아닙니다.
 
-**베타 상태:** 인증된 로컬 HTTP 확장 통신을 제공하는 [Desktop Pet v0.4.17-beta.10](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.17-beta.10)이 필요한 테스트용 프리릴리스입니다. 일반 교환에서 매번 `tern-exchange` 프로세스를 실행하지 않고 `tern.fetch`를 사용합니다. 서명된 설치·프로필 탐색과 승인된 이전 명령은 하위 프로세스로 유지하며, 교환 실패 시 프로세스 방식으로 우회하지 않습니다. 안정판·기본 채널은 변경하지 않습니다. 프로덕션 소스는 실제 Tern 0.9.5의 격리 Luau VM에서 재시작·미확정 결과·프록시 정보 유출 방지·최종 프로필 변경 검사 등 **272/272** 통제 경계 회귀를 통과했습니다. 별도 실제 SDK HTTP 스모크도 인증된 순차 요청 32개를 완료했습니다. 이는 사용 중인 실제 세션의 연결 유지나 실제 에이전트·모델 전달, 물리 GUI 수락의 증거를 대신하지 않습니다.
+**베타 상태:** 인증된 로컬 HTTP 확장 통신을 제공하는 [Desktop Pet v0.4.17-beta.11](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.17-beta.11)과 함께 사용하는 테스트용 프리릴리스입니다. beta.10 소스 태그에 통신 수정이 포함되지만, 같은 전용 설치 위치의 CLI 교체까지 완성하기 위해 산출물 공개 전에 워크플로를 취소하고 beta.11로 진행했습니다. 일반 교환에서 매번 `tern-exchange` 프로세스를 실행하지 않고 `tern.fetch`를 사용합니다. 서명된 설치·프로필 탐색과 승인된 이전 명령은 하위 프로세스로 유지하며, 교환 실패 시 프로세스 방식으로 우회하지 않습니다. 안정판·기본 채널은 변경하지 않습니다. 프로덕션 소스는 실제 Tern 0.9.5의 격리 Luau VM에서 재시작·미확정 결과·프록시 정보 유출 방지·최종 프로필 변경 검사 등 **272/272** 통제 경계 회귀를 통과했습니다. 별도 실제 SDK HTTP 스모크도 인증된 순차 요청 32개를 완료했습니다. 이는 사용 중인 실제 세션의 연결 유지나 실제 에이전트·모델 전달, 물리 GUI 수락의 증거를 대신하지 않습니다.
 
 ### Core beta.6 adapter 호환 소스 통합
 
@@ -16,7 +16,7 @@
 
 기존 소스 커밋과 호환 기준 코드의 권한 검사를 보존합니다. 지원되는 실제 창의 회귀 결과는 아래에 기록하며, 공개 바이트 설치·인증된 재연결·물리 GUI 수락은 각각 별도의 실행 증거가 필요합니다.
 
-이번 베타는 체크섬을 검증한 Core beta.10 앱을 먼저 설치하고, 검증된 전용 설치 위치의 서명된 소비자 패키지를 설치합니다.
+이번 베타는 체크섬을 검증한 Core beta.11 앱을 먼저 설치하고, 검증된 전용 설치 위치의 서명된 소비자 패키지를 설치합니다.
 
 ```sh
 tern plugin install "$HOME/.local/share/desktop-pet/libexec/DesktopPet.app/Contents/Resources/integrations/tern-desktop-pet" --force
