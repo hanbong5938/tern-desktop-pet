@@ -2,13 +2,13 @@
 
 [English](README.md) · **한국어**
 
-## Desktop Pet 소비자 — 플러그인 0.2.2-beta.1
+## Desktop Pet 소비자 — 플러그인 0.2.2-beta.2
 
 이 창 플러그인은 Tern 에이전트 관찰과 의미 기반 질문을 별도로 설치한 호스트 중립 [Desktop Pet](https://github.com/hanbong5938/desktop-pet) 앱에 연결합니다. `native-adapter`는 Tern 연동만 소유하며 앱·UI·캐릭터·업데이터는 공통 저장소에 있습니다. 플러그인은 네이티브 앱을 **다운로드·설치·빌드·자동 시작·중지하지 않습니다**. 플러그인 업데이트/제거로 공용 앱이나 두 프로필 디렉터리를 변경하지 않습니다.
 
 [앱 홈페이지](https://hanbong5938.github.io/desktop-pet/) · [Core 설치·프로필](https://github.com/hanbong5938/desktop-pet/blob/main/docs/development.ko.md) · [현재 앱 사용법](https://github.com/hanbong5938/desktop-pet/blob/main/docs/usage.ko.md) · [Core Wiki](https://github.com/hanbong5938/desktop-pet/wiki) · [기존 설치 이전](https://github.com/hanbong5938/desktop-pet/blob/main/docs/migrations/desktop-pet.md). 링크는 core 소유의 목적지이며 실제 공개 배포·재연결 증거가 아닙니다.
 
-**베타 상태:** 교환 복구·최종 pane/session 전달 검사를 서명된 소유자의 이전 권한 및 Core beta.6 호환 기준 코드와 합친 테스트용 프리릴리스입니다. [Desktop Pet v0.4.17-beta.7](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.17-beta.7)은 이 소비자와 일치하는 네이티브 adapter를 같은 불변 revision으로 고정·패키징합니다. 안정판·기본 채널은 변경하지 않습니다. 통합 프로덕션 소스는 실제 Tern 0.9.5 창에서 통제 경계 **209/209**를 통과했으며, 실제 에이전트·모델 전달이나 이전 중단 복구의 증거는 아닙니다.
+**베타 상태:** 교환 복구·최종 pane/session 전달 검사를 서명된 소유자의 이전 권한 및 Core beta.6 호환 기준 코드와 합친 테스트용 프리릴리스입니다. [Desktop Pet v0.4.17-beta.8](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.17-beta.8)은 이 소비자와 일치하는 네이티브 adapter를 같은 불변 revision으로 고정·패키징합니다. 안정판·기본 채널은 변경하지 않습니다. 변경하지 않은 통합 프로덕션 소스는 실제 Tern 0.9.5 창에서 통제 경계 **209/209**를 통과했으며, 실제 에이전트·모델 전달이나 이전 중단 복구의 증거는 아닙니다. 앱 beta.7의 패키징 차단 뒤 beta.2는 패키지·배포 메타데이터만 갱신하며 검증한 window 소스는 변경하지 않습니다.
 
 ### Core beta.6 adapter 호환 소스 통합
 
@@ -16,7 +16,7 @@
 
 기존 소스 커밋과 호환 기준 코드의 권한 검사를 보존합니다. 지원되는 실제 창의 회귀 결과는 아래에 기록하며, 공개 바이트 설치·인증된 재연결·물리 GUI 수락은 각각 별도의 실행 증거가 필요합니다.
 
-이번 베타는 체크섬을 검증한 Core beta.7 앱을 먼저 설치하고, 서명된 앱에 고정해 넣은 소비자 패키지를 설치합니다.
+이번 베타는 체크섬을 검증한 Core beta.8 앱을 먼저 설치하고, 서명된 앱에 고정해 넣은 소비자 패키지를 설치합니다.
 
 ```sh
 tern plugin install "$HOME/Applications/DesktopPet.app/Contents/Resources/integrations/tern-desktop-pet" --force

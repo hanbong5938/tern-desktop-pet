@@ -1,6 +1,6 @@
 schema = 1
 id = "tern-desktop-pet"
 name = "Tern Desktop Pet"
-version = "0.2.2-beta.1"
+version = "0.2.2-beta.2"
 description = "Observe local and remote Tern agents in the separately installed Desktop Pet app, with local-only replies."
 window = "window.luau"

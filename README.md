@@ -2,13 +2,13 @@
 
 **English** · [한국어](README.ko.md)
 
-## Desktop Pet consumer — plugin 0.2.2-beta.1
+## Desktop Pet consumer — plugin 0.2.2-beta.2
 
 This window plugin connects Tern agent observations and semantic asks to the separately installed, host-neutral [Desktop Pet](https://github.com/hanbong5938/desktop-pet) app. Native adapter code lives in `native-adapter`; the app/UI/artwork/updater live in the core repository. The plugin **never downloads, installs, builds, auto-starts, or stops the native app**. Updating/removing the plugin does not update/remove the shared app or either native profile directory.
 
 [App homepage](https://hanbong5938.github.io/desktop-pet/en/) · [Core installation / profiles](https://github.com/hanbong5938/desktop-pet/blob/main/docs/development.md) · [Current usage](https://github.com/hanbong5938/desktop-pet/blob/main/docs/usage.md) · [Core Wiki](https://github.com/hanbong5938/desktop-pet/wiki) · [Legacy migration](https://github.com/hanbong5938/desktop-pet/blob/main/docs/migrations/desktop-pet.md). These are core-owned destination links, not hosted-publication or real reconnect evidence.
 
-**Beta status:** this testing-only prerelease combines exchange recovery and final pane/session delivery guards with the signed-owner migration and Core beta.6 compatibility baseline. [Desktop Pet v0.4.17-beta.7](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.17-beta.7) pins and packages this consumer with its matching native adapter. Stable/default channels are unchanged. The integrated production source passed **209/209** controlled-boundary cases in an actual Tern 0.9.5 window; this is not proof of real agent/model delivery or migration crash recovery.
+**Beta status:** this testing-only prerelease combines exchange recovery and final pane/session delivery guards with the signed-owner migration and Core beta.6 compatibility baseline. [Desktop Pet v0.4.17-beta.8](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.17-beta.8) pins and packages this consumer with its matching native adapter. Stable/default channels are unchanged. The unchanged integrated production source passed **209/209** controlled-boundary cases in an actual Tern 0.9.5 window; this is not proof of real agent/model delivery or migration crash recovery. Beta.2 updates package/release metadata after the paired app's beta.7 packaging gate failed; it does not change the tested window source.
 
 ### Core beta.6 adapter compatibility merge
 
@@ -16,7 +16,7 @@ The source compatibility branch combines `work/authority-deadline-021` (`7276c1b
 
 The beta preserves existing source commits and the compatibility baseline's authority checks. Its supported-window regression result is recorded below; published-byte installation, authenticated reconnect and physical GUI acceptance require their own runtime evidence.
 
-For this beta, install the checksum-verified Core beta.7 app first, then install its signed, pinned consumer package:
+For this beta, install the checksum-verified Core beta.8 app first, then install its signed, pinned consumer package:
 
 ```sh
 tern plugin install "$HOME/Applications/DesktopPet.app/Contents/Resources/integrations/tern-desktop-pet" --force
