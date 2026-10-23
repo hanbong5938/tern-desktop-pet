@@ -10,6 +10,8 @@
 
 **베타 상태:** 인증된 로컬 HTTP 확장 통신과 전용 설치 위치의 정식 교체 경로를 제공하는 [Desktop Pet v0.4.17-beta.12](https://github.com/hanbong5938/desktop-pet/releases/tag/v0.4.17-beta.12)와 함께 사용하는 테스트용 프리릴리스입니다. beta.10/.11 소스 태그는 보존하지만 공개 앱 산출물은 없으며, beta.12에서 서명된 소비자 패키지와 컴파일된 어댑터의 고정 정보를 일치시켰습니다. 일반 교환에서 매번 `tern-exchange` 프로세스를 실행하지 않고 `tern.fetch`를 사용합니다. 서명된 설치·프로필 탐색과 승인된 이전 명령은 하위 프로세스로 유지하며, 교환 실패 시 프로세스 방식으로 우회하지 않습니다. 안정판·기본 채널은 변경하지 않습니다. 프로덕션 소스는 실제 Tern 0.9.5의 격리 Luau VM에서 재시작·미확정 결과·프록시 정보 유출 방지·최종 프로필 변경 검사 등 **272/272** 통제 경계 회귀를 통과했습니다. 별도 실제 SDK HTTP 스모크도 인증된 순차 요청 32개를 완료했습니다. 이는 사용 중인 실제 세션의 연결 유지나 실제 에이전트·모델 전달, 물리 GUI 수락의 증거를 대신하지 않습니다.
 
+**미해결 Tern 0.9.5 오류:** 실제 설치한 beta.12/beta.3에서도 동기 `cx.agents:list()` 호출 경계에서 창 훅의 50 ms 제한 초과가 재현됐습니다. 해당 VM은 HTTP 요청 전 중단됐으며 다른 VM은 로컬·원격 교환을 계속했습니다. 이 기록은 SDK 호출 경계를 특정하지만 내부 네이티브 작업·변환·스케줄링 중 무엇이 원인인지는 구분하지 못합니다. 설치된 SDK와 현재 공개 SDK에는 같은 의미의 상태를 제공하는 비동기·분할 목록 API가 없고, 같은 증상의 [상위 이슈 #137](https://github.com/stencil-hq/tern-sdk/issues/137)에도 수정된 앱 버전이 명시되지 않았습니다. **지속적인 세션 연결은 검증 완료가 아닙니다.** 플러그인 목록의 `ready`는 창 훅이 정상이라는 증거가 아니며, 반복 재로드·오래된 스냅샷·pane 상태 추측은 해결책이 아닙니다.
+
 ### Core beta.6 adapter 호환 소스 통합
 
 호환 소스 브랜치는 `work/authority-deadline-021` (`7276c1b658a1728883d90207119df31bce118170`)과 `main`의 freshness/raw-framing 수정 (`0699207351fed1bb354cb38324c6d8e531e3a80d`)을 합칩니다. 당시 기준 소스는 authority 브랜치의 `plugin.toml`·`window.luau`·라이선스 바이트를 그대로 보존했습니다. 이번 복구/최종 대상 검사 통합은 서명된 소유자의 이전 권한을 바꾸지 않고 `window.luau`를 수정하며 native evidence regression 호출 전체를 소비자 소유 `PreferenceAccess` 계약에 맞췄습니다. 합쳐진 Core beta.6 workspace의 contracts override를 사용해 native adapter regression 44개가 통과했으며 Core 배포에는 로컬 path 의존성을 남기지 않습니다.
